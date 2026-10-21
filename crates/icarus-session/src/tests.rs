@@ -156,3 +156,170 @@ fn render_reports_master_and_taps() {
     // The filter darkens the oscillator.
     assert!(out["taps"]["osc"]["centroid_hz"].as_f64() > out["master"]["centroid_hz"].as_f64());
 }
+
+fn drain(rx: &std::sync::mpsc::Receiver<Event>) -> Vec<Event> {
+    rx.try_iter().collect()
+}
+
+#[test]
+fn subscribers_get_only_their_paths() {
+    let mut s = session_with_chain();
+    let (filt_feed, filt_rx) = s.open_feed();
+    let (all_feed, all_rx) = s.open_feed();
+    s.handle_with_feed(
+        "vr",
+        Some(filt_feed),
+        Request::Subscribe {
+            paths: vec!["/nodes/filt".into()],
+        },
+    )
+    .unwrap();
+    s.handle_with_feed(
+        "agent",
+        Some(all_feed),
+        Request::Subscribe {
+            paths: vec!["/".into()],
+        },
+    )
+    .unwrap();
+
+    s.handle(
+        "human",
+        req(json!({"type": "transaction", "commands": [
+            {"op": "set_param", "node": "filt", "param": "cutoff", "value": 2_000.0},
+            {"op": "set_param", "node": "osc", "param": "freq", "value": 220.0},
+        ]})),
+    )
+    .unwrap();
+
+    let filt_events = drain(&filt_rx);
+    assert_eq!(filt_events.len(), 1);
+    assert_eq!(filt_events[0].client, "human");
+    assert_eq!(filt_events[0].changes.len(), 1);
+    let change = &filt_events[0].changes[0];
+    assert_eq!(change.path, "/nodes/filt/params/cutoff");
+    assert_eq!(change.value, json!(2_000.0));
+    assert!(change.normalized.unwrap() > 0.5);
+
+    let all = drain(&all_rx);
+    assert_eq!(all[0].changes.len(), 2);
+    assert_eq!(all[0].seq, filt_events[0].seq);
+}
+
+#[test]
+fn gestures_broadcast_presence_moves_and_release() {
+    let mut s = session_with_chain();
+    let (feed, rx) = s.open_feed();
+    s.handle_with_feed(
+        "vr",
+        Some(feed),
+        Request::Subscribe {
+            paths: vec!["/touches".into(), "/nodes/filt/params".into()],
+        },
+    )
+    .unwrap();
+    let g = |phase: Value| req(json!({"type": "gesture", "gesture": phase}));
+    s.handle("agent", g(json!({"phase": "begin", "node": "filt", "param": "cutoff"})))
+        .unwrap();
+    assert_eq!(
+        s.handle(
+            "x",
+            Request::Get {
+                path: "/touches".into()
+            }
+        )
+        .unwrap(),
+        json!({"filt/cutoff": "agent"})
+    );
+    s.handle(
+        "agent",
+        g(json!({"phase": "move", "node": "filt", "param": "cutoff", "value": 500.0})),
+    )
+    .unwrap();
+    s.handle("agent", g(json!({"phase": "end", "node": "filt", "param": "cutoff"})))
+        .unwrap();
+
+    let paths: Vec<(String, Value)> = drain(&rx)
+        .into_iter()
+        .flat_map(|e| e.changes)
+        .map(|c| (c.path, c.value))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            ("/touches/filt/cutoff".into(), json!("agent")),
+            ("/nodes/filt/params/cutoff".into(), json!(500.0)),
+            ("/touches/filt/cutoff".into(), Value::Null),
+        ]
+    );
+}
+
+#[test]
+fn undo_and_structural_changes_emit_events() {
+    let mut s = session_with_chain();
+    let (feed, rx) = s.open_feed();
+    s.handle_with_feed(
+        "gui",
+        Some(feed),
+        Request::Subscribe {
+            paths: vec!["/nodes/amp".into(), "/connections".into()],
+        },
+    )
+    .unwrap();
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/nodes/amp".into(),
+            value: json!({"kind": "gain"}),
+        },
+    )
+    .unwrap();
+    let added = drain(&rx);
+    assert!(
+        added[0]
+            .changes
+            .iter()
+            .any(|c| c.path == "/nodes/amp/kind" && c.value == json!("gain"))
+    );
+
+    s.handle("human", Request::Undo).unwrap();
+    let undone = drain(&rx);
+    assert_eq!(undone[0].label, "undo set /nodes/amp");
+    assert!(undone[0].changes.iter().all(|c| c.value.is_null()));
+}
+
+#[test]
+fn closed_feeds_are_dropped_and_feedless_clients_cannot_subscribe() {
+    let mut s = session_with_chain();
+    assert!(
+        s.handle(
+            "mcp",
+            Request::Subscribe {
+                paths: vec!["/".into()]
+            }
+        )
+        .is_err()
+    );
+    let (feed, rx) = s.open_feed();
+    s.handle_with_feed(
+        "ws",
+        Some(feed),
+        Request::Subscribe {
+            paths: vec!["/".into()],
+        },
+    )
+    .unwrap();
+    drop(rx);
+    s.handle(
+        "x",
+        Request::Set {
+            path: "/project/tempo_bpm".into(),
+            value: json!(140),
+        },
+    )
+    .unwrap();
+    assert!(
+        s.handle_with_feed("ws", Some(feed), Request::Subscribe { paths: vec![] })
+            .is_err()
+    );
+}

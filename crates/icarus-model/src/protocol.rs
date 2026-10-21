@@ -135,6 +135,16 @@ pub enum Request {
         path: String,
         value: serde_json::Value,
     },
+    /// Push change events for these path prefixes (`/` for everything) to the caller's feed.
+    /// Only adapters with a push channel (socket, WebSocket, OSC, MCP polling) support it.
+    Subscribe {
+        paths: Vec<String>,
+    },
+    /// Stop events for these prefixes, or for all of them when `paths` is empty.
+    Unsubscribe {
+        #[serde(default)]
+        paths: Vec<String>,
+    },
     /// Child paths under `path`.
     List {
         #[serde(default)]

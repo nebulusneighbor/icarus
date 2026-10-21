@@ -1,29 +1,42 @@
 //! OSC over UDP, for control surfaces, VR rigs and patching environments.
 //!
 //! ```text
-//! /icarus/<path> <number>           set; e.g. /icarus/nodes/filt/params/cutoff/normalized 0.5
-//! /icarus/<path> <string>           set, the string parsed as JSON
-//! /icarus/<path>                    get; the reply goes back to the sender on the same address
-//! /icarus/touch/<node>/<param> 1|0  begin/end a gesture; sets of that param in between are moves
-//! /icarus/request <json>            any protocol request; reply on /icarus/reply
+//! /icarus/<path> <number>                set; e.g. /icarus/nodes/filt/params/cutoff/normalized 0.5
+//! /icarus/<path> <string>                set, the string parsed as JSON
+//! /icarus/<path>                         get; the reply goes back to the sender on the same address
+//! /icarus/touch/<node>/<param> 1|0       begin/end a gesture; sets of that param in between are moves
+//! /icarus/subscribe <path> [reply_port]  push changes under <path> back as /icarus/<changed path> <value>
+//!                                        (params also as .../normalized), to reply_port if given
+//! /icarus/unsubscribe [path]             stop one prefix, or all
+//! /icarus/request <json>                 any protocol request; reply on /icarus/reply
 //! ```
 
 use crate::Shared;
 use icarus_model::{Gesture, Request};
+use icarus_session::{Event, FeedId};
 use rosc::{OscMessage, OscPacket, OscType};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 const PREFIX: &str = "/icarus";
+
+/// What the adapter remembers about one sender.
+#[derive(Default)]
+struct Peer {
+    held: BTreeSet<(String, String)>,
+    feed: Option<FeedId>,
+    /// Where this peer's events go; shared with its forwarding thread.
+    reply_to: Arc<Mutex<Option<SocketAddr>>>,
+}
 
 pub fn spawn(shared: Shared, port: u16) -> anyhow::Result<JoinHandle<()>> {
     let socket = UdpSocket::bind(("0.0.0.0", port))?;
     eprintln!("icarus: OSC on udp port {port}");
     Ok(std::thread::spawn(move || {
-        let mut touches: HashMap<SocketAddr, BTreeSet<(String, String)>> = HashMap::new();
+        let mut peers: HashMap<SocketAddr, Peer> = HashMap::new();
         let mut buf = [0u8; rosc::decoder::MTU];
         loop {
             let Ok((len, from)) = socket.recv_from(&mut buf) else {
@@ -32,16 +45,20 @@ pub fn spawn(shared: Shared, port: u16) -> anyhow::Result<JoinHandle<()>> {
             let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..len]) else {
                 continue;
             };
-            let held = touches.entry(from).or_default();
+            let peer = peers.entry(from).or_default();
             for msg in flatten(packet) {
-                if let Some(reply) = handle(&shared, from, held, &msg)
-                    && let Ok(bytes) = rosc::encoder::encode(&OscPacket::Message(reply))
-                {
-                    let _ = socket.send_to(&bytes, from);
+                if let Some(reply) = handle(&shared, &socket, from, peer, &msg) {
+                    send(&socket, from, reply);
                 }
             }
         }
     }))
+}
+
+fn send(socket: &UdpSocket, to: SocketAddr, msg: OscMessage) {
+    if let Ok(bytes) = rosc::encoder::encode(&OscPacket::Message(msg)) {
+        let _ = socket.send_to(&bytes, to);
+    }
 }
 
 fn flatten(packet: OscPacket) -> Vec<OscMessage> {
@@ -68,15 +85,55 @@ fn to_osc(v: &Value) -> OscType {
     match v {
         Value::Number(n) => OscType::Float(n.as_f64().unwrap_or(0.0) as f32),
         Value::String(s) => OscType::String(s.clone()),
+        Value::Bool(b) => OscType::Bool(*b),
+        Value::Null => OscType::Nil,
         other => OscType::String(other.to_string()),
     }
+}
+
+/// Starts a thread that turns this peer's events into OSC messages.
+fn forward_events(
+    socket: &UdpSocket,
+    events: std::sync::mpsc::Receiver<Event>,
+    reply_to: Arc<Mutex<Option<SocketAddr>>>,
+) {
+    let Ok(socket) = socket.try_clone() else { return };
+    std::thread::spawn(move || {
+        for event in events {
+            let Some(to) = *reply_to.lock().expect("reply lock") else {
+                continue;
+            };
+            for change in event.changes {
+                let addr = format!("{PREFIX}{}", change.path);
+                if let Some(n) = change.normalized {
+                    send(
+                        &socket,
+                        to,
+                        OscMessage {
+                            addr: format!("{addr}/normalized"),
+                            args: vec![OscType::Float(n as f32)],
+                        },
+                    );
+                }
+                send(
+                    &socket,
+                    to,
+                    OscMessage {
+                        addr,
+                        args: vec![to_osc(&change.value)],
+                    },
+                );
+            }
+        }
+    });
 }
 
 /// Handles one message; returns a reply for gets, errors and raw requests.
 fn handle(
     shared: &Shared,
+    socket: &UdpSocket,
     from: SocketAddr,
-    held: &mut BTreeSet<(String, String)>,
+    peer: &mut Peer,
     msg: &OscMessage,
 ) -> Option<OscMessage> {
     let path = msg.addr.strip_prefix(PREFIX)?;
@@ -90,11 +147,44 @@ fn handle(
     };
     let error = |e: String| reply("/icarus/error", json!(e));
 
+    if path == "/subscribe" || path == "/unsubscribe" {
+        let prefix = msg
+            .args
+            .first()
+            .and_then(arg_value)
+            .and_then(|v| v.as_str().map(str::to_string));
+        let request = if path == "/subscribe" {
+            let port = msg.args.get(1).and_then(arg_value).and_then(|v| v.as_u64());
+            *peer.reply_to.lock().expect("reply lock") =
+                Some(port.map_or(from, |p| SocketAddr::new(from.ip(), p as u16)));
+            if peer.feed.is_none() {
+                let (feed, events) = session.open_feed();
+                forward_events(socket, events, peer.reply_to.clone());
+                peer.feed = Some(feed);
+            }
+            Request::Subscribe {
+                paths: vec![prefix.unwrap_or_else(|| "/".into())],
+            }
+        } else {
+            Request::Unsubscribe {
+                paths: prefix.into_iter().collect(),
+            }
+        };
+        return match session.handle_with_feed(&client, peer.feed, request) {
+            Ok(_) => None,
+            Err(e) => error(e.to_string()),
+        };
+    }
+
     if path == "/request" {
         let request = msg.args.first().and_then(arg_value)?;
         let result = serde_json::from_value::<Request>(request)
             .map_err(|e| e.to_string())
-            .and_then(|r| session.handle(&client, r).map_err(|e| e.to_string()));
+            .and_then(|r| {
+                session
+                    .handle_with_feed(&client, peer.feed, r)
+                    .map_err(|e| e.to_string())
+            });
         return match result {
             Ok(v) => reply("/icarus/reply", v),
             Err(e) => error(e),
@@ -124,9 +214,9 @@ fn handle(
         return match session.handle(&client, Request::Gesture { gesture }) {
             Ok(_) => {
                 if down {
-                    held.insert(key)
+                    peer.held.insert(key)
                 } else {
-                    held.remove(&key)
+                    peer.held.remove(&key)
                 };
                 None
             }
@@ -144,7 +234,7 @@ fn handle(
     // While a param is touched, its sets are gesture moves (one undo step, like a real knob).
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let request = match segs.as_slice() {
-        ["nodes", node, "params", param] if held.contains(&(node.to_string(), param.to_string())) => {
+        ["nodes", node, "params", param] if peer.held.contains(&(node.to_string(), param.to_string())) => {
             value.as_f64().map(|v| Request::Gesture {
                 gesture: Gesture::Move {
                     node: node.to_string(),
@@ -154,7 +244,9 @@ fn handle(
                 },
             })
         }
-        ["nodes", node, "params", param, "normalized"] if held.contains(&(node.to_string(), param.to_string())) => {
+        ["nodes", node, "params", param, "normalized"]
+            if peer.held.contains(&(node.to_string(), param.to_string())) =>
+        {
             let plain = session
                 .project()
                 .nodes

@@ -2,8 +2,10 @@
 //!
 //! Every client (GUI, agent, OSC surface, VR rig) calls [`Session::handle`] with its own name
 //! and a [`Request`]. There is no private API: whatever one client can do, any client can.
+//! Every change is broadcast as an [`Event`] to the feeds subscribed to the paths it touched.
 
 mod apply;
+mod events;
 mod paths;
 
 use icarus_analysis::analyze;
@@ -13,6 +15,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub use apply::apply_command;
+pub use events::{Change, Event, FeedId};
 
 const HISTORY_LIMIT: usize = 200;
 
@@ -66,6 +69,7 @@ pub struct Session {
     redo: Vec<Step>,
     touches: BTreeMap<(String, String), Touch>,
     sink: Option<Box<dyn EngineSink>>,
+    feeds: events::Feeds,
 }
 
 impl Session {
@@ -85,8 +89,23 @@ impl Session {
         self.sink = Some(sink);
     }
 
+    /// Opens an event feed. Subscribe it with [`Session::handle_with_feed`]; drop the receiver
+    /// or call [`Session::close_feed`] when the client goes away.
+    pub fn open_feed(&mut self) -> (FeedId, std::sync::mpsc::Receiver<Event>) {
+        self.feeds.open()
+    }
+
+    pub fn close_feed(&mut self, feed: FeedId) {
+        self.feeds.close(feed);
+    }
+
     /// Handles one request from `client`, returning a JSON result.
     pub fn handle(&mut self, client: &str, request: Request) -> Result<Value> {
+        self.handle_with_feed(client, None, request)
+    }
+
+    /// Like [`Session::handle`], for clients that own a feed and may subscribe it.
+    pub fn handle_with_feed(&mut self, client: &str, feed: Option<FeedId>, request: Request) -> Result<Value> {
         match request {
             Request::Transaction { label, commands } => self.transaction(client, label, commands),
             Request::Gesture { gesture } => self.gesture(client, gesture),
@@ -97,10 +116,33 @@ impl Session {
                 "redo": self.redo.iter().rev().map(|s| json!({"client": s.client, "label": s.label})).collect::<Vec<_>>(),
             })),
             Request::Snapshot => Ok(serde_json::to_value(&self.project)?),
+            Request::Get { path } if events::normalize(&path).starts_with("/touches") => Ok(self.touches_value()),
             Request::Get { path } => paths::get(&self.project, &path),
             Request::Set { path, value } => {
                 let commands = paths::set_commands(&self.project, &path, value)?;
                 self.transaction(client, Some(format!("set {path}")), commands)
+            }
+            Request::Subscribe { paths } => {
+                let Some(feed) = feed else {
+                    return invalid(
+                        "this connection cannot receive events; use the socket, WebSocket, OSC or MCP adapter",
+                    );
+                };
+                let paths = self
+                    .feeds
+                    .subscribe(feed, &paths)
+                    .ok_or_else(|| SessionError::Invalid("feed is closed".into()))?;
+                Ok(json!({ "feed": feed, "subscribed": paths }))
+            }
+            Request::Unsubscribe { paths } => {
+                let Some(feed) = feed else {
+                    return invalid("this connection has no event feed");
+                };
+                let paths = self
+                    .feeds
+                    .unsubscribe(feed, &paths)
+                    .ok_or_else(|| SessionError::Invalid("feed is closed".into()))?;
+                Ok(json!({ "feed": feed, "subscribed": paths }))
             }
             Request::List { path } => paths::list(&self.project, &path),
             Request::ListDevices => Ok(serde_json::to_value(devices::DEVICES)?),
@@ -138,6 +180,7 @@ impl Session {
 
     fn commit(&mut self, client: &str, label: String, next: Project, params_only: bool) {
         let before = std::mem::replace(&mut self.project, next);
+        self.feeds.emit(client, &label, events::diff(&before, &self.project));
         self.push_undo(Step {
             client: client.to_string(),
             label,
@@ -178,12 +221,18 @@ impl Session {
         };
         let Step { client, label, before } = step;
         let after = std::mem::replace(&mut self.project, before);
+        let mut changes = events::diff(&after, &self.project);
+        changes.extend(
+            std::mem::take(&mut self.touches)
+                .into_keys()
+                .map(|(n, p)| touch_change(&n, &p, None)),
+        );
+        self.feeds.emit(&client, &format!("undo {label}"), changes);
         self.redo.push(Step {
             client: client.clone(),
             label: label.clone(),
             before: after,
         });
-        self.touches.clear();
         if let Some(sink) = &mut self.sink {
             sink.project_changed(&self.project);
         }
@@ -196,6 +245,8 @@ impl Session {
         };
         let Step { client, label, before } = step;
         let before = std::mem::replace(&mut self.project, before);
+        self.feeds
+            .emit(&client, &format!("redo {label}"), events::diff(&before, &self.project));
         self.push_undo(Step {
             client: client.clone(),
             label: label.clone(),
@@ -228,6 +279,9 @@ impl Session {
                         record,
                     },
                 );
+                let label = format!("touch {node}.{param}");
+                self.feeds
+                    .emit(client, &label, vec![touch_change(&node, &param, Some(client))]);
                 Ok(json!({ "touching": format!("{node}.{param}"), "record": record }))
             }
             Gesture::Move {
@@ -256,6 +310,15 @@ impl Session {
                 if let Some(sink) = &mut self.sink {
                     sink.param_changed(&node, &param, value);
                 }
+                let mut changes = vec![events::param_change(&self.project, &node, &param).expect("validated")];
+                if record {
+                    changes.push(Change {
+                        path: format!("/nodes/{node}/automation/{param}"),
+                        value: json!(self.project.nodes[&node].automation[&param]),
+                        normalized: None,
+                    });
+                }
+                self.feeds.emit(client, &format!("move {node}.{param}"), changes);
                 Ok(json!({ "value": value }))
             }
             Gesture::End { node, param } => {
@@ -266,6 +329,11 @@ impl Session {
                     None => return invalid(format!("{node}.{param} is not being touched")),
                 }
                 let touch = self.touches.remove(&key).expect("checked above");
+                self.feeds.emit(
+                    client,
+                    &format!("release {node}.{param}"),
+                    vec![touch_change(&node, &param, None)],
+                );
                 if touch.record
                     && let Some(sink) = &mut self.sink
                 {
@@ -274,6 +342,15 @@ impl Session {
                 Ok(json!({ "released": format!("{node}.{param}") }))
             }
         }
+    }
+
+    fn touches_value(&self) -> Value {
+        Value::Object(
+            self.touches
+                .iter()
+                .map(|((node, param), t)| (format!("{node}/{param}"), json!(t.client)))
+                .collect(),
+        )
     }
 
     fn render(&self, spec: &icarus_model::RenderSpec, wav_path: Option<String>) -> Result<Value> {
@@ -304,6 +381,15 @@ impl Session {
             "taps": taps,
             "wav_path": wav_path,
         }))
+    }
+}
+
+/// Presence: who is holding a control, or `None` when it is released.
+fn touch_change(node: &str, param: &str, client: Option<&str>) -> Change {
+    Change {
+        path: format!("/touches/{node}/{param}"),
+        value: json!(client),
+        normalized: None,
     }
 }
 

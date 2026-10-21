@@ -27,6 +27,7 @@ pipewire = { version = "0.10.1", features = ["v0_3_49"] }
 clap = { version = "4.6.7", features = ["derive"] }
 anyhow = "1.0.104"
 rosc = "0.11.4"
+tungstenite = "0.30.0"
 
 [profile.dev]
 opt-level = 1

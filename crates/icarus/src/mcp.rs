@@ -5,8 +5,10 @@
 
 use crate::Shared;
 use icarus_model::{Gesture, ProbeSpec, RenderSpec, Request};
+use icarus_session::{Event, FeedId};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
+use std::sync::mpsc::Receiver;
 
 fn tools() -> Value {
     let path = json!({"type": "string", "description": "e.g. /nodes/filt/params/cutoff"});
@@ -77,6 +79,24 @@ fn tools() -> Value {
         {"name": "redo", "description": "Redo the last undone step.", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "history", "description": "Undo/redo history with which client made each change.", "inputSchema": {"type": "object", "properties": {}}},
         {
+            "name": "subscribe",
+            "description": "Watch path prefixes (e.g. /nodes/filt, /touches, or / for everything) for changes made by \
+                anyone: people on OSC/VR, other agents, undo. Then call `events` to read what happened.",
+            "inputSchema": {"type": "object", "properties": {"paths": {"type": "array", "items": path}}, "required": ["paths"]}
+        },
+        {
+            "name": "unsubscribe",
+            "description": "Stop watching these prefixes, or all of them when paths is empty.",
+            "inputSchema": {"type": "object", "properties": {"paths": {"type": "array", "items": path}}}
+        },
+        {
+            "name": "events",
+            "description": "Changes on watched paths since the last call, oldest first: who changed what (client), the \
+                step label, and new values (params include their 0..1 normalized position; null means removed). \
+                /touches/<node>/<param> shows who is holding a control. A gap in seq means events were dropped.",
+            "inputSchema": {"type": "object", "properties": {"max": {"type": "integer", "description": "Default 100"}}}
+        },
+        {
             "name": "request",
             "description": "Send any raw protocol request, e.g. {\"type\":\"save\",\"path\":\"song.json\"}. \
                 Types: transaction, gesture, undo, redo, history, snapshot, get, set, list, list_devices, describe, render, probe, save, load.",
@@ -89,9 +109,24 @@ fn arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, Str
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null)).map_err(|e| format!("`{key}`: {e}"))
 }
 
-fn call(shared: &Shared, client: &str, name: &str, args: &Value) -> Result<Value, String> {
+/// This connection's event feed.
+struct Feed {
+    id: FeedId,
+    events: Receiver<Event>,
+}
+
+fn call(shared: &Shared, feed: &Feed, client: &str, name: &str, args: &Value) -> Result<Value, String> {
+    if name == "events" {
+        let max = arg::<Option<usize>>(args, "max")?.unwrap_or(100);
+        let events: Vec<Event> = feed.events.try_iter().take(max).collect();
+        return Ok(json!({ "events": events }));
+    }
     let mut session = shared.lock().expect("session lock");
-    let mut run = |r: Request| session.handle(client, r).map_err(|e| e.to_string());
+    let mut run = |r: Request| {
+        session
+            .handle_with_feed(client, Some(feed.id), r)
+            .map_err(|e| e.to_string())
+    };
     match name {
         "list" => run(Request::List {
             path: arg::<Option<String>>(args, "path")?.unwrap_or_default(),
@@ -135,6 +170,12 @@ fn call(shared: &Shared, client: &str, name: &str, args: &Value) -> Result<Value
         "undo" => run(Request::Undo),
         "redo" => run(Request::Redo),
         "history" => run(Request::History),
+        "subscribe" => run(Request::Subscribe {
+            paths: arg(args, "paths")?,
+        }),
+        "unsubscribe" => run(Request::Unsubscribe {
+            paths: arg::<Option<Vec<String>>>(args, "paths")?.unwrap_or_default(),
+        }),
         "request" => run(arg(args, "request")?),
         _ => Err(format!("unknown tool `{name}`")),
     }
@@ -144,6 +185,8 @@ pub fn run(shared: Shared) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     let mut client = "mcp".to_string();
+    let (id, events) = shared.lock().expect("session lock").open_feed();
+    let feed = Feed { id, events };
     for line in stdin.lock().lines() {
         let line = line?;
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -169,7 +212,7 @@ pub fn run(shared: Shared) -> anyhow::Result<()> {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let (text, is_error) = match call(&shared, &client, name, &args) {
+                let (text, is_error) = match call(&shared, &feed, &client, name, &args) {
                     Ok(v) => (serde_json::to_string_pretty(&v)?, false),
                     Err(e) => (e, true),
                 };

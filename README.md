@@ -4,7 +4,7 @@ An open, modular DAW for Linux, built from scratch so that **agents, people, con
 
 Every part of the signal chain is raw, addressable and changeable through one protocol. No client has a private API, not even the GUI. An agent can do anything a person can, with the same fingers: it touches a knob, moves it, hears the result live, and lets go. It can also experiment before touching anything: it forks the project, renders dozens of variants in parallel, and measures what each parameter does to the sound.
 
-> **Status: early prototype.** The core works: a deterministic engine, live PipeWire playback, transactions, gestures, undo with attribution, the path tree, offline forked rendering and probing, and MCP, OSC and JSON-socket adapters. There's no GUI, MIDI or sequencer yet. See [ROADMAP](#roadmap).
+> **Status: early prototype.** The core works: a deterministic engine, live PipeWire playback, transactions, gestures, undo with attribution, the path tree, change events with subscriptions, offline forked rendering and probing, and MCP, OSC, WebSocket and JSON-socket adapters. There's no GUI, MIDI or sequencer yet. See [ROADMAP](#roadmap).
 
 ## Try it
 
@@ -27,14 +27,15 @@ The demo builds a saw → filter → gain patch, records a filter sweep as a ges
 One `serve` process runs one session. Turn on as many adapters as you like; they all share it.
 
 ```sh
-icarus serve --live --mcp --osc 9000 --socket 127.0.0.1:7878 [--project song.json]
+icarus serve --live --mcp --osc 9000 --ws 127.0.0.1:7879 --socket 127.0.0.1:7878 [--project song.json]
 ```
 
 | Adapter | For | Docs |
 |---|---|---|
 | `--mcp` | Claude Code and any other MCP-capable agent | [`crates/icarus/src/mcp.rs`](crates/icarus/src/mcp.rs) |
 | `--osc <port>` | TouchOSC, VR (Unity/Unreal/Godot OSC), Max/Pd, hardware | [`crates/icarus/src/osc.rs`](crates/icarus/src/osc.rs) |
-| `--socket <addr>` | Scripts, game engines, custom agents: line-delimited JSON | [`crates/icarus/src/socket.rs`](crates/icarus/src/socket.rs) |
+| `--ws <addr>` | Browsers, WebXR, game engines | [`crates/icarus/src/ws.rs`](crates/icarus/src/ws.rs) |
+| `--socket <addr>` | Scripts, custom agents: line-delimited JSON | [`crates/icarus/src/socket.rs`](crates/icarus/src/socket.rs) |
 | `--live` | Hear every change in real time through PipeWire | [`crates/icarus-pipewire`](crates/icarus-pipewire) |
 
 **Claude Code:**
@@ -65,6 +66,24 @@ Over the socket, `{"type":"set","path":"/nodes/filt/params/cutoff","value":800}`
           {"client": "mcp:claude-code",       "label": "add reverb send"}]}
 ```
 
+## Watch everything
+
+Any client can subscribe to path prefixes and get every change pushed to it, whoever made it:
+
+```jsonc
+// → over WebSocket or the JSON socket
+{"id": 1, "type": "subscribe", "paths": ["/nodes/filt", "/touches"]}
+// ← while an agent sweeps the filter from MCP
+{"event": {"seq": 2, "client": "mcp:claude-code", "label": "touch filt.cutoff",
+           "changes": [{"path": "/touches/filt/cutoff", "value": "mcp:claude-code"}]}}
+{"event": {"seq": 3, "client": "mcp:claude-code", "label": "move filt.cutoff",
+           "changes": [{"path": "/nodes/filt/params/cutoff", "value": 2000.0, "normalized": 0.667}]}}
+{"event": {"seq": 4, "client": "mcp:claude-code", "label": "release filt.cutoff",
+           "changes": [{"path": "/touches/filt/cutoff", "value": null}]}}
+```
+
+`/touches` is presence: it shows whose hand is on which control, so a VR scene can draw the agent's hand on the knob. OSC surfaces send `/icarus/subscribe /nodes/filt [reply_port]` and get `/icarus/nodes/filt/params/cutoff 2000` plus `.../normalized 0.667` back, which motorised faders and TouchOSC need. Agents on MCP use the `subscribe` and `events` tools.
+
 ## Why determinism matters
 
 The same project always renders to **bit-identical** audio, whatever the block size, machine or thread count. Parameters resolve per frame from the absolute sample position, every random source is seeded from the project, and devices hold no wall-clock state. That's what makes **forked rendering** useful: when an agent renders two copies that differ in one knob, any difference in the output is caused by that knob. Tests in [`icarus-render`](crates/icarus-render/src/lib.rs) enforce it.
@@ -77,16 +96,16 @@ The same project always renders to **bit-identical** audio, whatever the block s
 | `icarus-engine` | Deterministic audio graph, devices, parameter specs, lock-free realtime runner |
 | `icarus-analysis` | Features that describe audio to a model: levels, crest, centroid, band balance, width |
 | `icarus-render` | Offline forked rendering, taps on any node, parallel probing and sensitivity |
-| `icarus-session` | Transactions, gestures, undo with attribution, the path tree |
+| `icarus-session` | Transactions, gestures, undo with attribution, the path tree, change events and subscriptions |
 | `icarus-pipewire` | Live output |
-| `icarus` | CLI and adapters (MCP, OSC, JSON socket) |
+| `icarus` | CLI and adapters (MCP, OSC, WebSocket, JSON socket) |
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design rules and how to extend each layer.
 
 ## Roadmap
 
-- **Event subscriptions:** clients watch paths and get pushed changes (presence, live meters for VR).
-- **WebSocket adapter** for browser and WebXR clients.
+- **Live meters and taps as subscribable paths** (levels and spectra streamed to VR and agents).
+- **Authentication** for the network adapters.
 - **Clips, MIDI and a sequencer**, session and arrangement views.
 - **Device plugins:** CLAP and LV2 hosting out of process, and WASM/Faust devices that agents can write and hot-load.
 - **State-preserving graph swaps** (today a structural edit resets DSP state and can click).

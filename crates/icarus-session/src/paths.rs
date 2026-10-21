@@ -13,6 +13,7 @@
 //! /nodes/<id>/automation/<param>            [{time_s, value}], settable; null clears
 //! /connections                              [{from, to}], settable as a whole
 //! /devices, /devices/<kind>                 device catalogue
+//! /touches                                  who holds which control (served by the session)
 //! ```
 //!
 //! Every write becomes ordinary [`Command`]s, so it is validated, undoable and attributed.
@@ -71,7 +72,7 @@ pub fn describe_node(project: &Project, id: &str) -> Result<Value> {
 pub fn get(project: &Project, path: &str) -> Result<Value> {
     let seg = segments(path);
     Ok(match seg.as_slice() {
-        [] => json!(["project", "nodes", "connections", "devices"]),
+        [] => json!(["project", "nodes", "connections", "devices", "touches"]),
         ["project"] => json!({
             "sample_rate": project.sample_rate,
             "seed": project.seed,
@@ -118,7 +119,13 @@ pub fn get(project: &Project, path: &str) -> Result<Value> {
 pub fn list(project: &Project, path: &str) -> Result<Value> {
     let seg = segments(path);
     let children: Vec<String> = match seg.as_slice() {
-        [] => vec!["project".into(), "nodes".into(), "connections".into(), "devices".into()],
+        [] => vec![
+            "project".into(),
+            "nodes".into(),
+            "connections".into(),
+            "devices".into(),
+            "touches".into(),
+        ],
         ["project"] => vec![
             "sample_rate".into(),
             "seed".into(),

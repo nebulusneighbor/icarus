@@ -5,6 +5,7 @@ mod demo;
 mod mcp;
 mod osc;
 mod socket;
+mod ws;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -45,6 +46,9 @@ enum Cmd {
         /// Accept line-delimited JSON requests on this TCP address, e.g. 127.0.0.1:7878.
         #[arg(long)]
         socket: Option<String>,
+        /// Accept WebSocket clients (browsers, WebXR, game engines) on this TCP address, e.g. 127.0.0.1:7879.
+        #[arg(long)]
+        ws: Option<String>,
         /// Play the session live through PipeWire.
         #[arg(long)]
         live: bool,
@@ -59,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             mcp,
             osc,
             socket,
+            ws,
             live,
         } => {
             let project = match project {
@@ -80,10 +85,16 @@ fn main() -> anyhow::Result<()> {
             if let Some(addr) = socket {
                 threads.push(socket::spawn(shared.clone(), &addr)?);
             }
+            if let Some(addr) = ws {
+                threads.push(ws::spawn(shared.clone(), &addr)?);
+            }
             if mcp {
                 return mcp::run(shared);
             }
-            anyhow::ensure!(!threads.is_empty(), "nothing to serve: pass --mcp, --osc or --socket");
+            anyhow::ensure!(
+                !threads.is_empty(),
+                "nothing to serve: pass --mcp, --osc, --socket or --ws"
+            );
             for t in threads {
                 let _ = t.join();
             }

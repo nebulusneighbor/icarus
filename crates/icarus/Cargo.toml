@@ -20,3 +20,4 @@ icarus-render.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 rosc.workspace = true
+tungstenite.workspace = true
