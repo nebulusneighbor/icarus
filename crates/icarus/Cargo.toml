@@ -1,0 +1,22 @@
+[package]
+name = "icarus"
+description = "Icarus CLI: demo, MCP server for agents, live playback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["live"]
+live = ["dep:icarus-pipewire"]
+
+[dependencies]
+icarus-model.workspace = true
+icarus-engine.workspace = true
+icarus-session.workspace = true
+icarus-pipewire = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+icarus-render.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rosc.workspace = true

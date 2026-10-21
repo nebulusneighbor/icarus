@@ -1,0 +1,10 @@
+[package]
+name = "icarus-model"
+description = "Project document and control protocol shared by every Icarus client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

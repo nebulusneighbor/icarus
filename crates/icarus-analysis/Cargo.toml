@@ -1,0 +1,10 @@
+[package]
+name = "icarus-analysis"
+description = "Audio features that let agents measure what they hear"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+rustfft.workspace = true

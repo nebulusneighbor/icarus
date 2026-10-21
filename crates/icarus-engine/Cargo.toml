@@ -1,0 +1,12 @@
+[package]
+name = "icarus-engine"
+description = "Deterministic, sample-accurate audio graph for Icarus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+icarus-model.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+rtrb.workspace = true
