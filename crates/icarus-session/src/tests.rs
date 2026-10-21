@@ -323,3 +323,185 @@ fn closed_feeds_are_dropped_and_feedless_clients_cannot_subscribe() {
             .is_err()
     );
 }
+
+#[test]
+fn ui_document_is_paths_with_events_and_no_op_writes_are_not_steps() {
+    let mut s = session_with_chain();
+    let (feed, rx) = s.open_feed();
+    s.handle_with_feed(
+        "gui",
+        Some(feed),
+        Request::Subscribe {
+            paths: vec!["/ui/panels".into()],
+        },
+    )
+    .unwrap();
+
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/ui/panels/mixer/area".into(),
+            value: json!("bottom"),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        s.handle(
+            "x",
+            Request::Get {
+                path: "/ui/panels/mixer/area".into()
+            }
+        )
+        .unwrap(),
+        json!("bottom")
+    );
+    let events = drain(&rx);
+    assert_eq!(
+        events[0].changes,
+        vec![Change {
+            path: "/ui/panels/mixer/area".into(),
+            value: json!("bottom"),
+            normalized: None
+        }]
+    );
+
+    // Deep writes create objects; null removes.
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/ui/panels/new/props/x".into(),
+            value: json!("osc.freq"),
+        },
+    )
+    .unwrap();
+    assert!(
+        s.handle(
+            "x",
+            Request::List {
+                path: "/ui/panels".into()
+            }
+        )
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .contains(&json!("/ui/panels/new"))
+    );
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/ui/panels/new".into(),
+            value: Value::Null,
+        },
+    )
+    .unwrap();
+    assert!(
+        s.handle(
+            "x",
+            Request::Get {
+                path: "/ui/panels/new".into()
+            }
+        )
+        .is_err()
+    );
+
+    // Arrays append at their length.
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/ui/tracks/0".into(),
+            value: json!({"name": "A"}),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        s.handle(
+            "x",
+            Request::Get {
+                path: "/ui/tracks/0/name".into()
+            }
+        )
+        .unwrap(),
+        json!("A")
+    );
+
+    let steps = s.handle("x", Request::History).unwrap()["undo"]
+        .as_array()
+        .unwrap()
+        .len();
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/ui/tracks/0/name".into(),
+            value: json!("A"),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        s.handle("x", Request::History).unwrap()["undo"]
+            .as_array()
+            .unwrap()
+            .len(),
+        steps
+    );
+}
+
+#[test]
+fn transport_is_session_state_with_events() {
+    let mut s = session_with_chain();
+    let (feed, rx) = s.open_feed();
+    s.handle_with_feed(
+        "gui",
+        Some(feed),
+        Request::Subscribe {
+            paths: vec!["/transport".into()],
+        },
+    )
+    .unwrap();
+    s.handle(
+        "agent",
+        Request::Set {
+            path: "/transport/playing".into(),
+            value: json!(true),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        s.handle(
+            "x",
+            Request::Get {
+                path: "/transport/playing".into()
+            }
+        )
+        .unwrap(),
+        json!(true)
+    );
+    assert_eq!(
+        s.handle(
+            "x",
+            Request::Get {
+                path: "/transport/live".into()
+            }
+        )
+        .unwrap(),
+        json!(false)
+    );
+    assert_eq!(drain(&rx)[0].changes[0].path, "/transport/playing");
+}
+
+#[test]
+fn moves_accept_normalized_positions() {
+    let mut s = session_with_chain();
+    let g = |phase: Value| req(json!({"type": "gesture", "gesture": phase}));
+    s.handle("vr", g(json!({"phase": "begin", "node": "filt", "param": "cutoff"})))
+        .unwrap();
+    s.handle(
+        "vr",
+        g(json!({"phase": "move", "node": "filt", "param": "cutoff", "normalized": 1.0})),
+    )
+    .unwrap();
+    assert!(
+        s.handle("vr", g(json!({"phase": "move", "node": "filt", "param": "cutoff"})))
+            .is_err()
+    );
+    assert_eq!(s.project().nodes["filt"].params["cutoff"], 20_000.0);
+}

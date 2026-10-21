@@ -46,6 +46,12 @@ pub enum Command {
     SetSeed {
         seed: u64,
     },
+    /// Write any part of the GUI document. `path` is relative to `/ui`, e.g. `/panels/mixer/area`.
+    /// Missing objects along the way are created; `null` removes the key.
+    SetUi {
+        path: String,
+        value: serde_json::Value,
+    },
 }
 
 /// A continuous action over time: a finger on a knob.
@@ -61,10 +67,14 @@ pub enum Gesture {
         #[serde(default)]
         record: bool,
     },
+    /// Give either `value` in plain units or `normalized` on the control's 0..1 range.
     Move {
         node: NodeId,
         param: String,
-        value: f64,
+        #[serde(default)]
+        value: Option<f64>,
+        #[serde(default)]
+        normalized: Option<f64>,
         #[serde(default)]
         at_s: Option<f64>,
     },

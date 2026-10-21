@@ -169,22 +169,50 @@ fn flatten(project: &Project) -> BTreeMap<String, Change> {
         }
     }
     leaves.extend(params.into_iter().map(|c| (c.path.clone(), c)));
+    flatten_json("/ui", &project.ui, &mut leaves);
     leaves
 }
 
+/// Non-empty objects are walked into; everything else (arrays, strings, numbers) is one leaf.
+fn flatten_json(prefix: &str, value: &Value, leaves: &mut BTreeMap<String, Change>) {
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            for (key, v) in map {
+                flatten_json(&format!("{prefix}/{key}"), v, leaves);
+            }
+        }
+        _ => {
+            leaves.insert(
+                prefix.to_string(),
+                Change {
+                    path: prefix.to_string(),
+                    value: value.clone(),
+                    normalized: None,
+                },
+            );
+        }
+    }
+}
+
 /// Paths whose values differ between two projects; removed paths become `null`.
+/// Removals come first, so a client applying changes in order never deletes something it was
+/// just given (e.g. when a leaf becomes an object).
 pub(crate) fn diff(before: &Project, after: &Project) -> Vec<Change> {
     let old = flatten(before);
     let new = flatten(after);
-    let mut changes: Vec<Change> = new
-        .iter()
-        .filter(|(path, c)| old.get(*path).map(|o| &o.value) != Some(&c.value))
-        .map(|(_, c)| c.clone())
+    let mut changes: Vec<Change> = old
+        .keys()
+        .filter(|p| !new.contains_key(*p))
+        .map(|path| Change {
+            path: path.clone(),
+            value: Value::Null,
+            normalized: None,
+        })
         .collect();
-    changes.extend(old.keys().filter(|p| !new.contains_key(*p)).map(|path| Change {
-        path: path.clone(),
-        value: Value::Null,
-        normalized: None,
-    }));
+    changes.extend(
+        new.iter()
+            .filter(|(path, c)| old.get(*path).map(|o| &o.value) != Some(&c.value))
+            .map(|(_, c)| c.clone()),
+    );
     changes
 }

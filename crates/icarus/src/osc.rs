@@ -233,36 +233,22 @@ fn handle(
 
     // While a param is touched, its sets are gesture moves (one undo step, like a real knob).
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let move_to = |node: &str, param: &str, value: Option<f64>, normalized: Option<f64>| {
+        Some(Request::Gesture {
+            gesture: Gesture::Move {
+                node: node.to_string(),
+                param: param.to_string(),
+                value,
+                normalized,
+                at_s: None,
+            },
+        })
+    };
+    let held = |node: &str, param: &str| peer.held.contains(&(node.to_string(), param.to_string()));
     let request = match segs.as_slice() {
-        ["nodes", node, "params", param] if peer.held.contains(&(node.to_string(), param.to_string())) => {
-            value.as_f64().map(|v| Request::Gesture {
-                gesture: Gesture::Move {
-                    node: node.to_string(),
-                    param: param.to_string(),
-                    value: v,
-                    at_s: None,
-                },
-            })
-        }
-        ["nodes", node, "params", param, "normalized"]
-            if peer.held.contains(&(node.to_string(), param.to_string())) =>
-        {
-            let plain = session
-                .project()
-                .nodes
-                .get(*node)
-                .and_then(|n| icarus_engine::devices::info(&n.kind))
-                .and_then(|d| d.params.iter().find(|p| p.id == *param))
-                .zip(value.as_f64())
-                .map(|(spec, n)| spec.from_normalized(n));
-            plain.map(|v| Request::Gesture {
-                gesture: Gesture::Move {
-                    node: node.to_string(),
-                    param: param.to_string(),
-                    value: v,
-                    at_s: None,
-                },
-            })
+        ["nodes", node, "params", param] if held(node, param) => move_to(node, param, value.as_f64(), None),
+        ["nodes", node, "params", param, "normalized"] if held(node, param) => {
+            move_to(node, param, None, value.as_f64())
         }
         _ => None,
     }

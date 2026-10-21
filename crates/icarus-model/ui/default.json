@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "theme": {
+    "--bg": "#14161a",
+    "--panel": "#1d2026",
+    "--panel-2": "#262a32",
+    "--panel-3": "#30353f",
+    "--border": "#363b46",
+    "--text": "#d9dce3",
+    "--muted": "#8b91a1",
+    "--accent": "#f0a236",
+    "--accent-2": "#4fb3d9",
+    "--danger": "#e5534b",
+    "--font": "system-ui, -apple-system, 'Segoe UI', sans-serif",
+    "--mono": "ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', monospace",
+    "--radius": "4px"
+  },
+  "layout": {
+    "columns": "210px 1fr 320px",
+    "rows": "46px 1fr 260px 150px",
+    "areas": [
+      ["top", "top", "top"],
+      ["left", "main", "right"],
+      ["left", "bottom", "right"],
+      ["left", "footer", "right"]
+    ]
+  },
+  "panels": {
+    "transport": { "type": "transport", "area": "top", "order": 0 },
+    "browser": { "type": "browser", "area": "left", "title": "Browser", "order": 0 },
+    "mixer": { "type": "mixer", "area": "main", "title": "Mixer", "order": 0 },
+    "graph": { "type": "graph", "area": "main", "title": "Graph", "order": 1 },
+    "automation": { "type": "automation", "area": "main", "title": "Automation", "order": 2 },
+    "xy": { "type": "xy-pad", "area": "main", "title": "XY Pad", "order": 3, "props": { "x": "", "y": "" } },
+    "devices": { "type": "devices", "area": "bottom", "title": "Devices", "order": 0 },
+    "inspector": { "type": "inspector", "area": "right", "title": "Inspector", "order": 0 },
+    "log": { "type": "log", "area": "footer", "title": "Activity", "order": 0 }
+  },
+  "tracks": [],
+  "graph": { "positions": {} },
+  "keys": {
+    " ": "transport.toggle",
+    "ctrl+z": "undo",
+    "ctrl+shift+z": "redo",
+    "ctrl+y": "redo",
+    "ctrl+e": "ui.edit",
+    "delete": "selection.delete"
+  },
+  "components": {
+    "xy-pad": {
+      "description": "Drag one point to move two parameters at once. Pick them in the dropdowns, or set props.x and props.y to \"node.param\"."
+    }
+  }
+}

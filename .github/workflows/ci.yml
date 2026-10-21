@@ -20,3 +20,13 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo run --release -- demo --out target/demo.wav
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: GUI end-to-end (headless Chrome + an agent on the socket)
+        run: node scripts/gui-smoke.mjs target/release/icarus google-chrome
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-screenshots
+          path: target/gui-*.png

@@ -100,6 +100,55 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<(), String>
             project.tempo_bpm = *bpm;
         }
         Command::SetSeed { seed } => project.seed = *seed,
+        Command::SetUi { path, value } => set_pointer(&mut project.ui, path, value.clone())?,
+    }
+    Ok(())
+}
+
+/// Writes `value` at a `/`-separated path inside a JSON document, creating objects on the way.
+/// Arrays are indexed by number, and an index equal to the length appends. `null` removes.
+pub fn set_pointer(root: &mut serde_json::Value, path: &str, value: serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let Some((last, parents)) = segs.split_last() else {
+        if !value.is_object() {
+            return Err("/ui must stay an object".into());
+        }
+        *root = value;
+        return Ok(());
+    };
+    let mut cur = root;
+    for seg in parents {
+        cur = match cur {
+            Value::Object(map) => map
+                .entry(seg.to_string())
+                .or_insert_with(|| Value::Object(Default::default())),
+            Value::Array(items) => {
+                let i: usize = seg.parse().map_err(|_| format!("`{seg}` is not an array index"))?;
+                items.get_mut(i).ok_or_else(|| format!("index {i} is out of range"))?
+            }
+            _ => return Err(format!("cannot descend into `{seg}`: not an object or array")),
+        };
+    }
+    match cur {
+        Value::Object(map) if value.is_null() => {
+            map.remove(*last);
+        }
+        Value::Object(map) => {
+            map.insert(last.to_string(), value);
+        }
+        Value::Array(items) => {
+            let i: usize = last.parse().map_err(|_| format!("`{last}` is not an array index"))?;
+            match (i.cmp(&items.len()), value.is_null()) {
+                (std::cmp::Ordering::Less, true) => {
+                    items.remove(i);
+                }
+                (std::cmp::Ordering::Less, false) => items[i] = value,
+                (std::cmp::Ordering::Equal, false) => items.push(value),
+                _ => return Err(format!("index {i} is out of range")),
+            }
+        }
+        _ => return Err(format!("cannot set `{last}`: parent is not an object or array")),
     }
     Ok(())
 }

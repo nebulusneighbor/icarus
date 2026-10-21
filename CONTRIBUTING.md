@@ -9,6 +9,7 @@ cargo fmt
 cargo clippy --all-targets   # no warnings
 cargo test                   # includes the determinism tests
 cargo run --release -- demo
+node scripts/gui-smoke.mjs   # if you touched the GUI, the session or an adapter (needs Node 22+ and Chromium)
 ```
 
 On Debian/Ubuntu you need `libpipewire-0.3-dev`, `pkg-config` and `clang`. On Arch, `pipewire` and `clang`.

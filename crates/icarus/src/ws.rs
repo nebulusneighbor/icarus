@@ -1,4 +1,5 @@
-//! WebSocket, for browsers, WebXR and game engines.
+//! WebSocket, for browsers, WebXR and game engines. Plain HTTP requests on the same port get
+//! the stock GUI (see `gui.rs`), which connects back here as an ordinary client.
 //!
 //! Same messages as the JSON socket (see `socket.rs`), one per text frame: requests or
 //! envelopes in, `{"id", "ok", ...}` replies and `{"event": ...}` pushes out.
@@ -7,9 +8,11 @@
 //! the session, so bind to localhost unless the network is trusted.
 
 use crate::Shared;
+use crate::gui;
 use crate::socket::handle_message;
 use serde_json::json;
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tungstenite::{Error, Message};
@@ -17,14 +20,21 @@ use tungstenite::{Error, Message};
 /// How long a read waits before the connection checks for events to push.
 const POLL: Duration = Duration::from_millis(5);
 
-pub fn spawn(shared: Shared, addr: &str) -> anyhow::Result<JoinHandle<()>> {
+pub fn spawn(shared: Shared, addr: &str, gui_dir: Option<PathBuf>) -> anyhow::Result<JoinHandle<()>> {
     let listener = TcpListener::bind(addr)?;
-    eprintln!("icarus: WebSocket on ws://{}", listener.local_addr()?);
+    let local = listener.local_addr()?;
+    eprintln!("icarus: GUI on http://{local}  (WebSocket on ws://{local})");
     Ok(std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let shared = shared.clone();
+            let gui_dir = gui_dir.clone();
             std::thread::spawn(move || {
-                if let Err(e) = serve(&shared, stream) {
+                let result = match gui::is_websocket(&stream) {
+                    Ok(true) => serve(&shared, stream),
+                    Ok(false) => gui::serve_http(stream, gui_dir.as_ref()).map_err(Into::into),
+                    Err(e) => Err(e.into()),
+                };
+                if let Err(e) = result {
                     eprintln!("icarus: websocket client error: {e}");
                 }
             });

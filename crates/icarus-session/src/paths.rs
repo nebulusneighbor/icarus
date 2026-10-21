@@ -13,7 +13,10 @@
 //! /nodes/<id>/automation/<param>            [{time_s, value}], settable; null clears
 //! /connections                              [{from, to}], settable as a whole
 //! /devices, /devices/<kind>                 device catalogue
+//! /ui/...                                   the GUI document: layout, panels, tracks, theme, keys,
+//!                                           components. Any depth is readable and settable.
 //! /touches                                  who holds which control (served by the session)
+//! /transport/{playing,live,position_s}      playback state (served by the session)
 //! ```
 //!
 //! Every write becomes ordinary [`Command`]s, so it is validated, undoable and attributed.
@@ -72,7 +75,23 @@ pub fn describe_node(project: &Project, id: &str) -> Result<Value> {
 pub fn get(project: &Project, path: &str) -> Result<Value> {
     let seg = segments(path);
     Ok(match seg.as_slice() {
-        [] => json!(["project", "nodes", "connections", "devices", "touches"]),
+        [] => json!([
+            "project",
+            "nodes",
+            "connections",
+            "devices",
+            "ui",
+            "touches",
+            "transport"
+        ]),
+        ["ui", rest @ ..] => {
+            let pointer: String = rest.iter().map(|s| format!("/{s}")).collect();
+            project
+                .ui
+                .pointer(&pointer)
+                .cloned()
+                .ok_or_else(|| SessionError::Invalid(format!("no path `{path}`")))?
+        }
         ["project"] => json!({
             "sample_rate": project.sample_rate,
             "seed": project.seed,
@@ -124,8 +143,18 @@ pub fn list(project: &Project, path: &str) -> Result<Value> {
             "nodes".into(),
             "connections".into(),
             "devices".into(),
+            "ui".into(),
             "touches".into(),
+            "transport".into(),
         ],
+        ["ui", rest @ ..] => {
+            let pointer: String = rest.iter().map(|s| format!("/{s}")).collect();
+            match project.ui.pointer(&pointer) {
+                Some(Value::Object(map)) => map.keys().cloned().collect(),
+                Some(Value::Array(items)) => (0..items.len()).map(|i| i.to_string()).collect(),
+                _ => return invalid(format!("`{path}` has no children")),
+            }
+        }
         ["project"] => vec![
             "sample_rate".into(),
             "seed".into(),
@@ -211,6 +240,10 @@ pub fn set_commands(project: &Project, path: &str, value: Value) -> Result<Vec<C
             node: id.to_string(),
             param: param.to_string(),
             points: serde_json::from_value::<Vec<AutoPoint>>(value)?,
+        }],
+        ["ui", rest @ ..] => vec![Command::SetUi {
+            path: rest.iter().map(|s| format!("/{s}")).collect(),
+            value,
         }],
         ["connections"] => {
             let wanted: Vec<Connection> = serde_json::from_value(value)?;

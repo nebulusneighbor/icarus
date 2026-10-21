@@ -42,6 +42,14 @@ impl EngineSink for LiveOutput {
         self.handle.set_param(node, param, value);
     }
 
+    fn set_playing(&mut self, playing: bool) {
+        self.handle.set_playing(playing);
+    }
+
+    fn position(&self) -> Option<u64> {
+        Some(self.handle.position())
+    }
+
     fn project_changed(&mut self, project: &Project) {
         match Graph::compile(project) {
             Ok(graph) => {

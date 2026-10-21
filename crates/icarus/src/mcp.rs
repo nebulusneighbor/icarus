@@ -2,13 +2,127 @@
 //!
 //! The tools are thin: each one builds protocol [`Request`]s, and `request` accepts any request
 //! verbatim, so an agent is never limited to what the curated tools cover.
+//!
+//! The server either owns a session ([`Local`]) or bridges to one that is already running, such
+//! as the GUI's, over the JSON socket ([`Remote`]). MCP clients start servers as subprocesses,
+//! so the bridge is how an agent joins the session a person is already working in.
 
 use crate::Shared;
 use icarus_model::{Gesture, ProbeSpec, RenderSpec, Request};
 use icarus_session::{Event, FeedId};
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
-use std::sync::mpsc::Receiver;
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
+
+/// Most events a bridge holds for an agent that is not polling; older ones are dropped.
+const MAX_QUEUED_EVENTS: usize = 10_000;
+
+/// Where requests go.
+pub trait Backend {
+    fn request(&mut self, client: &str, request: Request) -> Result<Value, String>;
+    /// Up to `max` queued events, oldest first.
+    fn events(&mut self, max: usize) -> Vec<Value>;
+}
+
+/// A session in this process.
+pub struct Local {
+    shared: Shared,
+    feed: FeedId,
+    events: Receiver<Event>,
+}
+
+impl Local {
+    pub fn new(shared: Shared) -> Self {
+        let (feed, events) = shared.lock().expect("session lock").open_feed();
+        Self { shared, feed, events }
+    }
+}
+
+impl Backend for Local {
+    fn request(&mut self, client: &str, request: Request) -> Result<Value, String> {
+        self.shared
+            .lock()
+            .expect("session lock")
+            .handle_with_feed(client, Some(self.feed), request)
+            .map_err(|e| e.to_string())
+    }
+
+    fn events(&mut self, max: usize) -> Vec<Value> {
+        self.events.try_iter().take(max).map(|e| json!(e)).collect()
+    }
+}
+
+/// A session in another process, reached through its JSON socket.
+pub struct Remote {
+    writer: TcpStream,
+    replies: Receiver<Value>,
+    events: Arc<Mutex<VecDeque<Value>>>,
+    next_id: u64,
+}
+
+impl Remote {
+    pub fn connect(addr: &str) -> anyhow::Result<Self> {
+        let stream = TcpStream::connect(addr)?;
+        let reader = BufReader::new(stream.try_clone()?);
+        let (reply_tx, replies) = channel();
+        let events: Arc<Mutex<VecDeque<Value>>> = Arc::default();
+        let queue = events.clone();
+        std::thread::spawn(move || {
+            for line in reader.lines() {
+                let Some(msg) = line.ok().and_then(|l| serde_json::from_str::<Value>(&l).ok()) else {
+                    break;
+                };
+                if let Some(event) = msg.get("event") {
+                    let mut q = queue.lock().expect("event queue");
+                    if q.len() == MAX_QUEUED_EVENTS {
+                        q.pop_front();
+                    }
+                    q.push_back(event.clone());
+                } else if reply_tx.send(msg).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            writer: stream,
+            replies,
+            events,
+            next_id: 0,
+        })
+    }
+}
+
+impl Backend for Remote {
+    fn request(&mut self, client: &str, request: Request) -> Result<Value, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        let line = json!({ "id": id, "client": client, "request": request });
+        writeln!(self.writer, "{line}").map_err(|e| format!("session connection lost: {e}"))?;
+        loop {
+            let reply = self
+                .replies
+                .recv()
+                .map_err(|_| "session connection closed".to_string())?;
+            if reply["id"] != json!(id) {
+                continue;
+            }
+            return if reply["ok"] == json!(true) {
+                Ok(reply["result"].clone())
+            } else {
+                Err(reply["error"].as_str().unwrap_or("request failed").to_string())
+            };
+        }
+    }
+
+    fn events(&mut self, max: usize) -> Vec<Value> {
+        let mut q = self.events.lock().expect("event queue");
+        let n = max.min(q.len());
+        q.drain(..n).collect()
+    }
+}
 
 fn tools() -> Value {
     let path = json!({"type": "string", "description": "e.g. /nodes/filt/params/cutoff"});
@@ -44,7 +158,8 @@ fn tools() -> Value {
         {
             "name": "gesture",
             "description": "Move a control like a finger on a knob. Send events in order: {phase:begin,node,param,record?}, \
-                {phase:move,node,param,value,at_s?}..., {phase:end,node,param}. The whole gesture is one undo step. \
+                {phase:move,node,param,value|normalized,at_s?}..., {phase:end,node,param}. normalized is 0..1 on the \
+                control's curve. The whole gesture is one undo step. \
                 With record:true every move needs at_s and is written to automation. Live playback hears each move.",
             "inputSchema": {"type": "object", "properties": {
                 "events": {"type": "array", "items": {"type": "object", "properties": {"phase": {"enum": ["begin", "move", "end"]}}, "required": ["phase"]}}
@@ -109,24 +224,12 @@ fn arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, Str
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null)).map_err(|e| format!("`{key}`: {e}"))
 }
 
-/// This connection's event feed.
-struct Feed {
-    id: FeedId,
-    events: Receiver<Event>,
-}
-
-fn call(shared: &Shared, feed: &Feed, client: &str, name: &str, args: &Value) -> Result<Value, String> {
+fn call(backend: &mut dyn Backend, client: &str, name: &str, args: &Value) -> Result<Value, String> {
     if name == "events" {
         let max = arg::<Option<usize>>(args, "max")?.unwrap_or(100);
-        let events: Vec<Event> = feed.events.try_iter().take(max).collect();
-        return Ok(json!({ "events": events }));
+        return Ok(json!({ "events": backend.events(max) }));
     }
-    let mut session = shared.lock().expect("session lock");
-    let mut run = |r: Request| {
-        session
-            .handle_with_feed(client, Some(feed.id), r)
-            .map_err(|e| e.to_string())
-    };
+    let mut run = |r: Request| backend.request(client, r);
     match name {
         "list" => run(Request::List {
             path: arg::<Option<String>>(args, "path")?.unwrap_or_default(),
@@ -181,12 +284,10 @@ fn call(shared: &Shared, feed: &Feed, client: &str, name: &str, args: &Value) ->
     }
 }
 
-pub fn run(shared: Shared) -> anyhow::Result<()> {
+pub fn run(mut backend: impl Backend) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     let mut client = "mcp".to_string();
-    let (id, events) = shared.lock().expect("session lock").open_feed();
-    let feed = Feed { id, events };
     for line in stdin.lock().lines() {
         let line = line?;
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -204,7 +305,9 @@ pub fn run(shared: Shared) -> anyhow::Result<()> {
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "icarus", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": "Icarus is a DAW. Everything is a path: start with list('/'). Probe before changing \
-                        sound, render to verify after. Every change is undoable and attributed to you."
+                        sound, render to verify after. Every change is undoable and attributed to you. The GUI is \
+                        data at /ui (layout, panels, tracks, theme, keys, and custom panel code under /ui/components): \
+                        change it the same way. Start playback with set /transport/playing true."
                 }))
             }
             "ping" => Ok(json!({})),
@@ -212,7 +315,7 @@ pub fn run(shared: Shared) -> anyhow::Result<()> {
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                let (text, is_error) = match call(&shared, &feed, &client, name, &args) {
+                let (text, is_error) = match call(&mut backend, &client, name, &args) {
                     Ok(v) => (serde_json::to_string_pretty(&v)?, false),
                     Err(e) => (e, true),
                 };

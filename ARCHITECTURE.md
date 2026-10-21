@@ -1,7 +1,7 @@
 # Architecture
 
 ```
- Claude / any agent   TouchOSC / VR   browser / WebXR   scripts      (future) GUI
+ Claude / any agent   TouchOSC / VR   stock GUI, WebXR   scripts
         │ MCP              │ OSC          │ WebSocket       │ JSON socket   │
         └──────────────────┴──────────────┴───────┬─────────┴───────────────┘
                  requests ▲ │ events (subscribed path prefixes)
@@ -37,6 +37,18 @@ These hold for every change. If one has to bend, discuss it in an issue first.
 | A transport (gRPC, MIDI, ...) | A module in `crates/icarus/src/` that turns its input into `Request`s, like `socket.rs`. Use a client name such as `grpc:<peer>`. Open a feed per connection with `Session::open_feed`, pass it to `handle_with_feed`, deliver its events, and close it when the connection ends. |
 | An agent | No code needed: connect over MCP, OSC or the socket. If your agent needs something it can't do, that's a missing protocol feature, so open an issue. |
 
+## The GUI
+
+The stock GUI (`crates/icarus/gui/`) is plain ES modules with no build step, served on the WebSocket port. It follows the rules above like any client: it loads a snapshot, subscribes to `/`, and sends ordinary requests. Knob and fader drags are gestures, so a person's hand shows in `/touches` just like an agent's.
+
+Everything that shapes the GUI is data in `/ui` (see the README). `app.js` rebuilds the layout whenever `/ui`, the graph or the project changes. Parameter and touch changes only refresh the affected controls in place, so drags stay smooth.
+
+- **Tracks are an interpretation, not an engine concept.** `/ui/tracks` names chains of nodes. Track operations in `tracks.js` change the graph and `/ui/tracks` in one transaction. The Graph view shows the real thing, including nodes no track claims.
+- **Custom panels** (`/ui/components/<type>/source`) run in `<iframe sandbox="allow-scripts">`, talking to the page only by `postMessage`. They get the same powers as any protocol client, attributed to `<gui client>/<panel id>`. A component with the same name as a built-in replaces it.
+- **Adding a built-in panel:** write `gui/panels/<name>.js` exporting `(el, ctx, panel, id) => ({update?, destroy?})`, register it in `BUILTINS` in `app.js` and in `FILES` in `src/gui.rs`.
+
+`node scripts/gui-smoke.mjs` drives the GUI in headless Chromium while an agent works the same session over the socket, and checks that each sees the other. CI runs it.
+
 ## Gestures
 
 A gesture is `begin → move* → end` on one parameter, held by one client. While it's held, other clients can't move that parameter (like a finger on a motorised fader). The whole gesture is one undo step. With `record: true`, moves carrying `at_s` are written to automation. Live playback hears every move immediately, because parameter-only changes go straight to the audio thread without recompiling.
@@ -56,6 +68,8 @@ A feed is subscribed to path prefixes (`/` for everything). A change matches a p
 - Structural edits recompile the graph and reset DSP state, so you may hear a click.
 - The session is behind one mutex, so a long probe blocks other clients until it finishes.
 - Event queues are unbounded: a subscriber that never reads (for example an MCP agent that never calls `events`) grows its queue.
-- The WebSocket, socket and OSC adapters have no authentication. Bind them to localhost unless the network is trusted.
+- The WebSocket, socket and OSC adapters have no authentication. Bind them to localhost unless the network is trusted. This matters more now: anyone who can connect can also install custom panel code. It runs sandboxed, but it can still do anything a client can.
+- Every structural change rebuilds the whole GUI, and custom panels reload on any `/ui` change.
+- A transaction that changes nothing returns `"unchanged": true` and is not added to history.
 - Offline renders always start at sample 0 so that the state at the start of the region is correct, which means rendering late regions costs more.
 - Devices are compiled in. Plugin hosting and hot-loaded devices are on the roadmap.

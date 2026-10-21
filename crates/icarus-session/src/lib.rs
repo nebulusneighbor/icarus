@@ -47,6 +47,12 @@ pub trait EngineSink: Send {
     fn param_changed(&mut self, node: &str, param: &str, value: f64);
     /// Anything else changed; the sink should recompile.
     fn project_changed(&mut self, project: &Project);
+    /// Start or stop playback. Stopping rewinds to the start.
+    fn set_playing(&mut self, _playing: bool) {}
+    /// Current playback position in samples.
+    fn position(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// One undoable step: the project as it was before the change, and who made the change.
@@ -70,6 +76,7 @@ pub struct Session {
     touches: BTreeMap<(String, String), Touch>,
     sink: Option<Box<dyn EngineSink>>,
     feeds: events::Feeds,
+    playing: bool,
 }
 
 impl Session {
@@ -117,6 +124,22 @@ impl Session {
             })),
             Request::Snapshot => Ok(serde_json::to_value(&self.project)?),
             Request::Get { path } if events::normalize(&path).starts_with("/touches") => Ok(self.touches_value()),
+            Request::Get { path } if events::normalize(&path).starts_with("/transport") => {
+                let transport = self.transport_value();
+                match events::normalize(&path).strip_prefix("/transport/") {
+                    None => Ok(transport),
+                    Some(field) => transport
+                        .get(field)
+                        .cloned()
+                        .ok_or_else(|| SessionError::Invalid(format!("no path `{path}`"))),
+                }
+            }
+            Request::Set { path, value } if events::normalize(&path) == "/transport/playing" => {
+                let Some(playing) = value.as_bool() else {
+                    return invalid("/transport/playing must be true or false");
+                };
+                self.set_playing(client, playing)
+            }
             Request::Get { path } => paths::get(&self.project, &path),
             Request::Set { path, value } => {
                 let commands = paths::set_commands(&self.project, &path, value)?;
@@ -144,6 +167,11 @@ impl Session {
                     .ok_or_else(|| SessionError::Invalid("feed is closed".into()))?;
                 Ok(json!({ "feed": feed, "subscribed": paths }))
             }
+            Request::List { path } if events::normalize(&path) == "/transport" => Ok(json!([
+                "/transport/playing",
+                "/transport/live",
+                "/transport/position_s"
+            ])),
             Request::List { path } => paths::list(&self.project, &path),
             Request::ListDevices => Ok(serde_json::to_value(devices::DEVICES)?),
             Request::Describe { node } => paths::describe_node(&self.project, &node),
@@ -172,8 +200,12 @@ impl Session {
             apply_command(&mut next, cmd).map_err(|e| SessionError::Invalid(format!("command {i} ({cmd:?}): {e}")))?;
         }
         Graph::compile(&next)?;
-        let params_only = commands.iter().all(|c| matches!(c, Command::SetParam { .. }));
         let label = label.unwrap_or_else(|| format!("{} command(s)", commands.len()));
+        // A change to nothing is not a step: it would make undo appear to do nothing.
+        if next == self.project {
+            return Ok(json!({ "ok": true, "label": label, "commands": commands.len(), "unchanged": true }));
+        }
+        let params_only = commands.iter().all(|c| matches!(c, Command::SetParam { .. }));
         self.commit(client, label.clone(), next, params_only);
         Ok(json!({ "ok": true, "label": label, "commands": commands.len() }))
     }
@@ -288,6 +320,7 @@ impl Session {
                 node,
                 param,
                 value,
+                normalized,
                 at_s,
             } => {
                 let record = match self.touches.get(&(node.clone(), param.clone())) {
@@ -295,7 +328,12 @@ impl Session {
                     Some(t) => return invalid(format!("{node}.{param} is held by {}", t.client)),
                     None => return invalid(format!("begin a gesture on {node}.{param} before moving it")),
                 };
-                let value = paths::param_spec(&self.project, &node, &param)?.clamp(value);
+                let spec = paths::param_spec(&self.project, &node, &param)?;
+                let value = match (value, normalized) {
+                    (Some(v), _) => spec.clamp(v),
+                    (None, Some(n)) => spec.from_normalized(n),
+                    (None, None) => return invalid("a move needs `value` or `normalized`"),
+                };
                 let n = self.project.nodes.get_mut(&node).expect("validated by param_spec");
                 n.params.insert(param.clone(), value);
                 if record {
@@ -342,6 +380,33 @@ impl Session {
                 Ok(json!({ "released": format!("{node}.{param}") }))
             }
         }
+    }
+
+    fn set_playing(&mut self, client: &str, playing: bool) -> Result<Value> {
+        self.playing = playing;
+        if let Some(sink) = &mut self.sink {
+            sink.set_playing(playing);
+        }
+        let label = if playing { "play" } else { "stop" };
+        self.feeds.emit(
+            client,
+            label,
+            vec![Change {
+                path: "/transport/playing".into(),
+                value: json!(playing),
+                normalized: None,
+            }],
+        );
+        Ok(json!({ "playing": playing }))
+    }
+
+    fn transport_value(&self) -> Value {
+        let position = self.sink.as_ref().and_then(|s| s.position()).unwrap_or(0);
+        json!({
+            "playing": self.playing,
+            "live": self.sink.is_some(),
+            "position_s": position as f64 / f64::from(self.project.sample_rate),
+        })
     }
 
     fn touches_value(&self) -> Value {

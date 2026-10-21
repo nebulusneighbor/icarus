@@ -1,11 +1,15 @@
 use crate::{Graph, MAX_BLOCK, ParamAddr};
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Messages from the control thread to the audio thread.
 pub enum EngineMsg {
     SetParam(ParamAddr, f32),
     /// Replace the running graph. The old one is sent back so it is freed off the audio thread.
     Swap(Box<Graph>),
+    /// Start, or stop and rewind.
+    SetPlaying(bool),
 }
 
 /// Lives on the audio thread. Never allocates, locks or frees.
@@ -14,6 +18,8 @@ pub struct RealtimeEngine {
     rx: rtrb::Consumer<EngineMsg>,
     trash: rtrb::Producer<Box<Graph>>,
     pos: u64,
+    playing: bool,
+    position: Arc<AtomicU64>,
 }
 
 /// Lives on the control thread; talks to a [`RealtimeEngine`].
@@ -21,23 +27,28 @@ pub struct EngineHandle {
     tx: rtrb::Producer<EngineMsg>,
     trash: rtrb::Consumer<Box<Graph>>,
     addrs: BTreeMap<(String, String), ParamAddr>,
+    position: Arc<AtomicU64>,
 }
 
 pub fn realtime_pair(graph: Graph) -> (RealtimeEngine, EngineHandle) {
     let (tx, rx) = rtrb::RingBuffer::new(1024);
     let (trash_tx, trash_rx) = rtrb::RingBuffer::new(16);
     let addrs = graph.param_addrs();
+    let position = Arc::new(AtomicU64::new(0));
     (
         RealtimeEngine {
             graph: Box::new(graph),
             rx,
             trash: trash_tx,
             pos: 0,
+            playing: false,
+            position: position.clone(),
         },
         EngineHandle {
             tx,
             trash: trash_rx,
             addrs,
+            position,
         },
     )
 }
@@ -61,7 +72,18 @@ impl RealtimeEngine {
                     }
                     self.pos %= self.graph.length();
                 }
+                EngineMsg::SetPlaying(playing) => {
+                    self.playing = playing;
+                    if !playing {
+                        self.pos = 0;
+                    }
+                }
             }
+        }
+        if !self.playing {
+            out.fill(0.0);
+            self.position.store(self.pos, Ordering::Relaxed);
+            return;
         }
 
         let mut frames_left = out.len() / 2;
@@ -79,6 +101,7 @@ impl RealtimeEngine {
             offset += n;
             frames_left -= n;
         }
+        self.position.store(self.pos, Ordering::Relaxed);
     }
 }
 
@@ -100,6 +123,16 @@ impl EngineHandle {
             self.addrs = addrs;
         }
         ok
+    }
+
+    pub fn set_playing(&mut self, playing: bool) -> bool {
+        self.drain_trash();
+        self.tx.push(EngineMsg::SetPlaying(playing)).is_ok()
+    }
+
+    /// Playback position in samples, as of the last audio callback.
+    pub fn position(&self) -> u64 {
+        self.position.load(Ordering::Relaxed)
     }
 
     fn drain_trash(&mut self) {

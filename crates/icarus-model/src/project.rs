@@ -17,6 +17,18 @@ pub struct Project {
     pub length_s: f64,
     pub nodes: BTreeMap<NodeId, Node>,
     pub connections: Vec<Connection>,
+    /// The GUI's own document: layout, panels, tracks, theme, key bindings and custom panel
+    /// code. The engine ignores it, and any client may rewrite any part of it.
+    #[serde(default = "default_ui")]
+    pub ui: serde_json::Value,
+}
+
+/// The stock interface. Custom panel sources live next to it and are spliced in by name.
+pub fn default_ui() -> serde_json::Value {
+    let mut ui: serde_json::Value =
+        serde_json::from_str(include_str!("../ui/default.json")).expect("default.json is valid JSON");
+    ui["components"]["xy-pad"]["source"] = include_str!("../ui/xy-pad.js").into();
+    ui
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,6 +66,7 @@ impl Default for Project {
             length_s: 8.0,
             nodes,
             connections: Vec::new(),
+            ui: default_ui(),
         }
     }
 }
