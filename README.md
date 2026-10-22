@@ -1,6 +1,6 @@
 # Icarus
 
-An open, modular DAW for Linux, built from scratch so that **agents, people, controllers and VR rigs are all equal clients**.
+An open, modular DAW for Linux, built from scratch so that **agents, people, controllers and extensible rigs are all equal clients**.
 
 Every part of the signal chain is raw, addressable and changeable through one protocol. No client has a private API, not even the GUI. An agent can do anything a person can, with the same fingers: it touches a knob, moves it, hears the result live, and lets go. It can also experiment before touching anything: it forks the project, renders dozens of variants in parallel, and measures what each parameter does to the sound.
 
