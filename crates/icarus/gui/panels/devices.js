@@ -57,7 +57,7 @@ export default function devices(el, ctx) {
         .map((k) => h("option", { value: k }, k)),
     );
     row.append(menu, h("div", { class: "arrow" }, "→"), h("div", { class: "device ghost", style: { "--track": track.color } }, h("div", { class: "device-head" }, track.name, " mix")));
-  } else if (ctx.selection.node) {
+  } else if (ctx.selection.node && client.state.project.nodes[ctx.selection.node]) {
     const id = ctx.selection.node;
     row.append(
       deviceCard(ctx, id, {

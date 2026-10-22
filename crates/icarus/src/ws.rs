@@ -2,7 +2,8 @@
 //! the stock GUI (see `gui.rs`), which connects back here as an ordinary client.
 //!
 //! Same messages as the JSON socket (see `socket.rs`), one per text frame: requests or
-//! envelopes in, `{"id", "ok", ...}` replies and `{"event": ...}` pushes out.
+//! envelopes in, `{"id", "ok", ...}` replies and `{"event": ...}` pushes out. Events caused by a
+//! request are sent before its reply, so a client's state is current when the reply arrives.
 //!
 //! There is no authentication or origin check yet: anything that can reach the port controls
 //! the session, so bind to localhost unless the network is trusted.
@@ -53,6 +54,9 @@ fn serve(shared: &Shared, stream: TcpStream) -> anyhow::Result<()> {
         match ws.read() {
             Ok(Message::Text(text)) => {
                 let reply = handle_message(shared, feed, &default_client, &text);
+                if let Err(e) = push_events(&mut ws, &events) {
+                    break Err(e);
+                }
                 if let Err(e) = ws.send(Message::text(reply.to_string())) {
                     break Err(e);
                 }
@@ -62,20 +66,14 @@ fn serve(shared: &Shared, stream: TcpStream) -> anyhow::Result<()> {
             Err(Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(e) => break Err(e),
         }
-        let mut pushed = false;
-        let mut failed = None;
-        for event in events.try_iter() {
-            if let Err(e) = ws.write(Message::text(json!({ "event": event }).to_string())) {
-                failed = Some(e);
-                break;
+        match push_events(&mut ws, &events) {
+            Ok(true) => {
+                if let Err(e) = ws.flush() {
+                    break Err(e);
+                }
             }
-            pushed = true;
-        }
-        if let Some(e) = failed {
-            break Err(e);
-        }
-        if pushed && let Err(e) = ws.flush() {
-            break Err(e);
+            Ok(false) => {}
+            Err(e) => break Err(e),
         }
     };
     shared.lock().expect("session lock").close_feed(feed);
@@ -83,4 +81,17 @@ fn serve(shared: &Shared, stream: TcpStream) -> anyhow::Result<()> {
         Ok(()) | Err(Error::ConnectionClosed | Error::AlreadyClosed) => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Queues every pending event on the socket; returns whether there were any. The caller flushes.
+fn push_events(
+    ws: &mut tungstenite::WebSocket<TcpStream>,
+    events: &std::sync::mpsc::Receiver<icarus_session::Event>,
+) -> Result<bool, Error> {
+    let mut any = false;
+    for event in events.try_iter() {
+        ws.write(Message::text(json!({ "event": event }).to_string()))?;
+        any = true;
+    }
+    Ok(any)
 }

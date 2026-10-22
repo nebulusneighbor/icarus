@@ -109,7 +109,7 @@ pub fn show(ui: &mut Ui, s: &mut Studio) {
                 .show(ui, |ui| {
                     ui.label(RichText::new(format!("{} mix", track.name)).color(p.muted))
                 });
-        } else if let Some(id) = s.sel.node.clone() {
+        } else if let Some(id) = s.sel.node.clone().filter(|id| s.m.project.nodes.contains_key(id)) {
             action = card(ui, s, &id, false, false, id != "master");
         } else {
             ui.label(

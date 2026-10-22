@@ -5,13 +5,14 @@
 //! `{"id": any, "client": "...", "request": {...}}` to name the caller and tag the reply.
 //! Replies are `{"id", "ok": true, "result"}` or `{"id", "ok": false, "error"}`. After a
 //! `{"type": "subscribe", "paths": [...]}`, change events arrive on the same connection as
-//! `{"event": {...}}` lines.
+//! `{"event": {...}}` lines. Events caused by a request are written before its reply.
 
 use crate::Shared;
-use icarus_session::FeedId;
+use icarus_session::{Event, FeedId};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -34,12 +35,17 @@ fn serve(shared: &Shared, stream: TcpStream) -> std::io::Result<()> {
     let default_client = format!("socket:{}", stream.peer_addr()?);
     let writer = Arc::new(Mutex::new(stream.try_clone()?));
     let (feed, events) = shared.lock().expect("session lock").open_feed();
+    // Shared so the request path can flush its own events before replying. Lock order is
+    // always events, then writer.
+    let events = Arc::new(Mutex::new(events));
 
-    let event_writer = writer.clone();
+    let (idle_events, idle_writer) = (events.clone(), writer.clone());
     std::thread::spawn(move || {
-        for event in events {
-            let mut w = event_writer.lock().expect("writer lock");
-            if writeln!(w, "{}", json!({ "event": event })).is_err() {
+        loop {
+            std::thread::sleep(IDLE_POLL);
+            let rx = idle_events.lock().expect("events lock");
+            let mut w = idle_writer.lock().expect("writer lock");
+            if write_pending(&rx, &mut *w).is_err() {
                 break;
             }
         }
@@ -52,13 +58,30 @@ fn serve(shared: &Shared, stream: TcpStream) -> std::io::Result<()> {
                 continue;
             }
             let reply = handle_message(shared, feed, &default_client, &line);
-            writeln!(writer.lock().expect("writer lock"), "{reply}")?;
+            let rx = events.lock().expect("events lock");
+            let mut w = writer.lock().expect("writer lock");
+            write_pending(&rx, &mut *w)?;
+            writeln!(w, "{reply}")?;
         }
         Ok(())
     })();
     // Closing the feed ends the event thread.
     shared.lock().expect("session lock").close_feed(feed);
     result
+}
+
+/// How often queued events are pushed while a connection is idle.
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Writes every queued event. Fails when the connection or the feed has gone away.
+fn write_pending(events: &Receiver<Event>, w: &mut impl Write) -> std::io::Result<()> {
+    loop {
+        match events.try_recv() {
+            Ok(event) => writeln!(w, "{}", json!({ "event": event }))?,
+            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Disconnected) => return Err(std::io::ErrorKind::BrokenPipe.into()),
+        }
+    }
 }
 
 /// Handles one JSON message (bare request or envelope) and builds the reply.

@@ -165,18 +165,8 @@ impl Studio {
             ctx.request_repaint_after(POLL);
         }
 
-        let tracks = self.m.tracks();
-        if self.sel.track.is_some_and(|t| t >= tracks.len()) {
-            self.sel.track = None;
-        }
-        if self
-            .sel
-            .node
-            .as_ref()
-            .is_some_and(|n| !self.m.project.nodes.contains_key(n))
-        {
-            self.sel.node = None;
-        }
+        // Selections are not cleared when they point at nothing: right after an edit, the
+        // event describing it may not have arrived yet. Panels show a hint until it does.
 
         self.pal = Palette::from_ui(&self.m.project.ui);
         if self.applied_theme != Some(self.pal) {

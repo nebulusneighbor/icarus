@@ -5,7 +5,6 @@
 import { Client } from "./client.js";
 import { h } from "./widgets.js";
 import { mountComponent, TEMPLATE } from "./sandbox.js";
-import { tracks } from "./tracks.js";
 import transport from "./panels/transport.js";
 import browser from "./panels/browser.js";
 import mixer from "./panels/mixer.js";
@@ -94,8 +93,6 @@ function render() {
 
   for (const [k, v] of Object.entries(ui.theme ?? {})) document.documentElement.style.setProperty(k, v);
   document.body.classList.toggle("editing", ctx.editing);
-  if (ctx.selection.track !== null && !tracks(client)[ctx.selection.track]) ctx.selection.track = null;
-  if (ctx.selection.node && !client.state.project.nodes[ctx.selection.node]) ctx.selection.node = null;
 
   const layout = ui.layout ?? {};
   const areas = layout.areas ?? [["main"]];
