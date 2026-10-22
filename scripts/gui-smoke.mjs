@@ -70,9 +70,26 @@ const browser = spawn(chromium, [
   `--user-data-dir=${profile}`,
   "--window-size=1500,950",
   "--no-first-run",
+  "--no-default-browser-check",
+  // CI runners (Ubuntu 24.04) block the sandbox's user namespaces and have a tiny /dev/shm.
+  // The page under test is our own GUI on localhost.
+  "--no-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
   "about:blank",
 ]);
-const targets = await until(async () => (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json(), 8000);
+let browserLog = "";
+browser.stderr.on("data", (d) => (browserLog += d));
+const targets = await until(async () => {
+  const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
+  return list.some((t) => t.type === "page") ? list : null;
+}, 30000);
+if (!targets) {
+  console.log(`FAIL  browser started (${chromium} never opened its debugging port)\n${browserLog.slice(-2000)}`);
+  browser.kill();
+  server.kill();
+  process.exit(1);
+}
 const page = targets.find((t) => t.type === "page");
 const cdp = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r) => (cdp.onopen = r));
