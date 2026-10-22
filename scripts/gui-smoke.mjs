@@ -154,6 +154,11 @@ try {
   await ask({ type: "set", path: "/ui/panels/log/area", value: "right" });
   check("agent moves a panel to another area via /ui/panels", !!(await until(() => evaluate(`[...document.querySelectorAll('.area')].some(a => a.style.gridArea.startsWith('right') && [...a.querySelectorAll('.tab')].some(t => t.textContent === 'Activity'))`))));
 
+  // The agent composes a declarative panel (the same data renders natively in the desktop app).
+  await ask({ type: "set", path: "/ui/panels/macros", value: { type: "controls", area: "bottom", title: "Macros", order: -1, props: { widgets: [{ label: "Agent macros" }, { knob: `${osc}.freq`, label: "Pitch" }, { xy: [`${osc}.shape`, `${tracks[0].mix}.pan`] }] } } });
+  check("agent-composed controls panel renders (knob + XY pad)", !!(await until(() => evaluate(`!!document.querySelector('.controls [data-param="${osc}/freq"]') && !!document.querySelector('.controls .xy-pad')`))));
+  await ask({ type: "set", path: "/ui/panels/macros", value: null });
+
   // The agent writes a brand-new panel; it runs sandboxed and acts through the protocol.
   await ask({
     type: "transaction",

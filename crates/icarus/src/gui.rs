@@ -23,6 +23,7 @@ static FILES: &[(&str, &str)] = &[
     ("panels/automation.js", include_str!("../gui/panels/automation.js")),
     ("panels/inspector.js", include_str!("../gui/panels/inspector.js")),
     ("panels/log.js", include_str!("../gui/panels/log.js")),
+    ("panels/controls.js", include_str!("../gui/panels/controls.js")),
 ];
 
 fn content_type(path: &str) -> &'static str {

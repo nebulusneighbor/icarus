@@ -10,8 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install PipeWire headers
-        run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev pkg-config clang
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev pkg-config clang libxkbcommon-dev mesa-vulkan-drivers fonts-dejavu-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -29,4 +29,6 @@ jobs:
         if: always()
         with:
           name: gui-screenshots
-          path: target/gui-*.png
+          path: |
+            target/gui-*.png
+            target/app-*.png

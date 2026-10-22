@@ -4,18 +4,18 @@ An open, modular DAW for Linux, built from scratch so that **agents, people, con
 
 Every part of the signal chain is raw, addressable and changeable through one protocol. No client has a private API, not even the GUI. An agent can do anything a person can, with the same fingers: it touches a knob, moves it, hears the result live, and lets go. It can also experiment before touching anything: it forks the project, renders dozens of variants in parallel, and measures what each parameter does to the sound.
 
-> **Status: early prototype.** The core works: a deterministic engine, live PipeWire playback, transactions, gestures, undo with attribution, the path tree, change events with subscriptions, offline forked rendering and probing, MCP, OSC, WebSocket and JSON-socket adapters, and a stock GUI that is itself rewritable data. There's no MIDI or sequencer yet. See [ROADMAP](#roadmap).
+> **Status: early prototype.** The core works: a deterministic engine, live PipeWire playback, transactions, gestures, undo with attribution, the path tree, change events with subscriptions, offline forked rendering and probing, MCP, OSC, WebSocket and JSON-socket adapters, and two GUIs (a native desktop app and a browser GUI) that are both rewritable data. There's no MIDI or sequencer yet. See [ROADMAP](#roadmap).
 
-![The stock Icarus GUI: transport, browser, mixer, device chain, inspector and activity](docs/gui.png)
+![The native Icarus app with a "Macros" panel an agent composed from data: a knob and an XY pad driving the synth](docs/app.png)
 
 ## Try it
 
 ```sh
 cargo build --release
-./target/release/icarus gui        # opens the GUI in your browser, with live audio
+./target/release/icarus            # the native app, with live audio
 ```
 
-Add a synth track, press play (space), and turn knobs. To let Claude Code into the **same** session, so you can both work on it at once:
+Add a synth track, press play (space), and turn knobs. The app also serves the browser GUI for the same session at http://127.0.0.1:7880, so a tablet or second screen can join. To let Claude Code into the **same** session, so you can both work on it at once:
 
 ```sh
 claude mcp add icarus -- /path/to/icarus mcp --connect 127.0.0.1:7878
@@ -23,7 +23,14 @@ claude mcp add icarus -- /path/to/icarus mcp --connect 127.0.0.1:7878
 
 Its hand shows on the knobs it's holding, its changes appear in Activity under its own name, and Ctrl+Z undoes whatever was last done, by anyone.
 
-There's also a headless demo:
+To put Icarus in your app launcher:
+
+```sh
+cargo install --path crates/icarus                         # installs `icarus` to ~/.cargo/bin
+cp packaging/icarus.desktop ~/.local/share/applications/   # needs ~/.cargo/bin on your PATH
+```
+
+Prefer the browser? `icarus gui` runs only the browser GUI. There's also a headless demo:
 
 ```sh
 ./target/release/icarus demo
@@ -38,14 +45,26 @@ The demo builds a saw → filter → gain patch, records a filter sweep as a ges
    filt.resonance   -> centroid_hz     +425.7 over full range
 ```
 
+## Two GUIs, one session, and agents in either
+
+Icarus has two interfaces, and you can use both at the same time:
+
+- **The native app** (`icarus`) is a Rust desktop app built with egui. It's fast, has a real window and desktop integration, and is the base for native plugin windows and heavy views like waveforms.
+- **The browser GUI** (`icarus gui`, or http://127.0.0.1:7880 while the app runs) works from any device on the network and runs custom panels written as web code. It's also the path to VR through WebXR.
+
+Neither GUI has special access. Both are protocol clients, exactly like agents, so **agent access never depends on which GUI is open**: agents connect to the session, not to a window. A change from either GUI or from any agent shows up in all of them immediately. `icarus --connect 127.0.0.1:7878` opens a second native window on a session that's already running.
+
+![The browser GUI for the same kind of session](docs/gui.png)
+
 ## The GUI is data, so anyone can change it
 
-The stock GUI is a browser app served by Icarus itself. It's an ordinary protocol client with no private access, and everything about it lives in the project at `/ui`:
+Both GUIs build themselves from the same document in the project, at `/ui`:
 
 | Path | What it controls |
 |---|---|
 | `/ui/layout` | The grid: `columns`, `rows`, and named `areas` |
 | `/ui/panels/<id>` | Each panel: `type`, which `area` it sits in, `title`, `order`, `props` |
+| `/ui/panels/<id>` with `"type": "controls"` | A panel **composed from widgets by data alone**: knobs, faders, XY pads, labels, buttons. Native in both GUIs. |
 | `/ui/tracks` | How the graph is read as tracks: `{name, color, devices: [node ids], mix}` |
 | `/ui/theme` | Every colour, font and radius (CSS variables) |
 | `/ui/keys` | Key bindings, e.g. `"ctrl+z": "undo"` |
@@ -58,16 +77,21 @@ Change any of it from anywhere, and every open GUI rebuilds:
 {"type": "set", "path": "/ui/theme/--accent", "value": "#7ee787"}            // restyle
 {"type": "set", "path": "/ui/panels/log/area", "value": "right"}             // rearrange
 {"type": "set", "path": "/ui/layout/columns", "value": "160px 1fr 0px"}      // hide a column
-{"type": "transaction", "commands": [                                        // invent a panel
+{"type": "set", "path": "/ui/panels/macros", "value": {"type": "controls", "area": "bottom", "props": {"widgets": [
+  {"knob": "t1_osc.freq", "label": "Pitch"}, {"xy": ["t1_filter.cutoff", "t1_filter.resonance"]},
+  {"button": "Drop", "request": {"type": "set", "path": "/nodes/t1_filter/params/cutoff", "value": 200}}]}}}
+{"type": "transaction", "commands": [                                        // invent a panel in code (browser)
   {"op": "set_ui", "path": "/components/meter", "value": {"source": "root.textContent = '…'"}},
   {"op": "set_ui", "path": "/panels/meter", "value": {"type": "meter", "area": "bottom"}}]}
 ```
 
+`controls` panels are the way to give a panel to both GUIs at once, with fast native widgets. Panels written as code (`/ui/components`) run in the browser GUI; the native app shows them with an "Open in browser" button for now.
+
 Custom panels run in a sandboxed iframe and can do exactly what any client can (`icarus.request/get/set/gesture/on`) and nothing more. Their requests are attributed to the panel, for example `gui:human/xy`. The stock XY pad ([`xy-pad.js`](crates/icarus-model/ui/xy-pad.js)) is one of these: it configures itself by writing its own props.
 
-In the GUI, **Edit UI** (Ctrl+E) exposes the same thing to people: add, move and remove panels, edit the layout, theme and keys as JSON, or write a new panel and see it live. The **Inspector** shows the whole session as the path tree, and you can edit any value there. To hack on the built-in panels themselves, run `icarus gui --gui-dir crates/icarus/gui` and reload the page after each edit.
+In either GUI, **Edit UI** (Ctrl+E) exposes the same thing to people: add, move and remove panels, edit the layout, theme and keys as JSON, or write a new panel and see it live. The **Inspector** shows the whole session as the path tree, and you can edit any value there. To hack on the built-in panels themselves, run `icarus gui --gui-dir crates/icarus/gui` and reload the page after each edit.
 
-The built-in panels are Transport, Browser, Mixer, Devices, Graph (patch anything to anything), Automation, Inspector, Activity and XY Pad.
+The built-in panels, in both GUIs, are Transport, Browser, Mixer, Devices, Graph (patch anything to anything), Automation, Inspector, Activity and Controls. The browser GUI also has the XY Pad custom panel.
 
 ## Connect anything
 
@@ -149,7 +173,9 @@ The same project always renders to **bit-identical** audio, whatever the block s
 | `icarus-render` | Offline forked rendering, taps on any node, parallel probing and sensitivity |
 | `icarus-session` | Transactions, gestures, undo with attribution, the path tree, change events and subscriptions |
 | `icarus-pipewire` | Live output |
-| `icarus` | CLI, adapters (MCP, OSC, WebSocket, JSON socket), and the stock GUI in `gui/` |
+| `icarus-client` | Connect to a session in this process or over its socket (used by MCP and the app) |
+| `icarus-app` | The native desktop app (egui), a protocol client that builds itself from `/ui` |
+| `icarus` | CLI, adapters (MCP, OSC, WebSocket, JSON socket), and the browser GUI in `gui/` |
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design rules and how to extend each layer.
 
@@ -163,6 +189,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) for the design rules and how to extend e
 - **Differentiable twins** of built-in devices, for gradient-based matching ("make it sound like this reference").
 - **Semantic hearing:** audio-text embeddings alongside the DSP features.
 - **WebXR GUI** on the same `/ui` document.
+- **Native app:** plugin editor windows, waveform and spectrum views, and embedded web views so code-based custom panels run natively too.
 
 ## License
 

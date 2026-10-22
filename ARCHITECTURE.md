@@ -1,7 +1,7 @@
 # Architecture
 
 ```
- Claude / any agent   TouchOSC / VR   stock GUI, WebXR   scripts
+ Claude / any agent   TouchOSC / VR   native app, browser GUI, WebXR   scripts
         │ MCP              │ OSC          │ WebSocket       │ JSON socket   │
         └──────────────────┴──────────────┴───────┬─────────┴───────────────┘
                  requests ▲ │ events (subscribed path prefixes)
@@ -37,9 +37,17 @@ These hold for every change. If one has to bend, discuss it in an issue first.
 | A transport (gRPC, MIDI, ...) | A module in `crates/icarus/src/` that turns its input into `Request`s, like `socket.rs`. Use a client name such as `grpc:<peer>`. Open a feed per connection with `Session::open_feed`, pass it to `handle_with_feed`, deliver its events, and close it when the connection ends. |
 | An agent | No code needed: connect over MCP, OSC or the socket. If your agent needs something it can't do, that's a missing protocol feature, so open an issue. |
 
-## The GUI
+## The GUIs
 
-The stock GUI (`crates/icarus/gui/`) is plain ES modules with no build step, served on the WebSocket port. It follows the rules above like any client: it loads a snapshot, subscribes to `/`, and sends ordinary requests. Knob and fader drags are gestures, so a person's hand shows in `/touches` just like an agent's.
+There are two, and both are ordinary clients that read the same `/ui` document. Agents connect to the session, never to a GUI, so agent access is identical whichever GUI is open, and both can be open at once.
+
+**The native app** (`crates/icarus-app`, egui) talks to the session through `icarus-client`: `Local` when it hosts the session (plain `icarus`, which also serves the browser GUI and the agent socket), and `Remote` with `--connect`. A background thread receives events and wakes the UI only when something changed. The app patches parameters, touches and transport in place, and reloads the snapshot for anything structural. Panels in `src/panels/` mirror the browser panels of the same type. Its tests (`src/tests.rs`) drive the real app headlessly with `egui_kittest` against a real session while an "agent" works the same session, and save screenshots to `target/app-*.png`. They also enforce accessible names on every input and fail on glyphs no installed font can draw.
+
+**`controls` panels** are the declarative middle ground: `props.widgets` lists knobs, faders, XY pads, labels, buttons (with any protocol request), rows and columns. Both GUIs render them natively, so an agent can build a panel for either GUI without writing code.
+
+### The browser GUI
+
+The browser GUI (`crates/icarus/gui/`) is plain ES modules with no build step, served on the WebSocket port. It follows the rules above like any client: it loads a snapshot, subscribes to `/`, and sends ordinary requests. Knob and fader drags are gestures, so a person's hand shows in `/touches` just like an agent's.
 
 Everything that shapes the GUI is data in `/ui` (see the README). `app.js` rebuilds the layout whenever `/ui`, the graph or the project changes. Parameter and touch changes only refresh the affected controls in place, so drags stay smooth.
 

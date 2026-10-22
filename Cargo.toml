@@ -15,6 +15,8 @@ icarus-analysis = { path = "crates/icarus-analysis" }
 icarus-render = { path = "crates/icarus-render" }
 icarus-session = { path = "crates/icarus-session" }
 icarus-pipewire = { path = "crates/icarus-pipewire" }
+icarus-client = { path = "crates/icarus-client" }
+icarus-app = { path = "crates/icarus-app" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -28,6 +30,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 anyhow = "1.0.104"
 rosc = "0.11.4"
 tungstenite = "0.30.0"
+eframe = "0.37.0"
 
 [profile.dev]
 opt-level = 1

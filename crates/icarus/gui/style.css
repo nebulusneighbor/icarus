@@ -160,3 +160,16 @@ canvas.lane { width: 100%; height: 100%; display: block; background: var(--bg); 
 .editor { flex: 1; resize: none; border: 0; padding: 10px; background: var(--bg); font: 12px/1.5 var(--mono); outline: none; tab-size: 2; }
 #toasts { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 30; }
 .toast { background: var(--panel-3); border-left: 3px solid var(--danger); padding: 8px 12px; border-radius: var(--radius); max-width: 420px; }
+
+/* Controls (declarative panels) */
+.controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; padding: 10px; }
+.controls-row { display: flex; gap: 8px; align-items: flex-start; }
+.controls-column { display: flex; flex-direction: column; gap: 8px; }
+.controls-label { align-self: center; }
+.xy-pad {
+  position: relative; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius);
+  touch-action: none; cursor: crosshair; background-size: 25% 25%;
+  background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px);
+}
+.xy-dot { position: absolute; width: 14px; height: 14px; margin: -7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+.xy-label { position: absolute; left: 6px; bottom: 4px; font-size: 10px; }

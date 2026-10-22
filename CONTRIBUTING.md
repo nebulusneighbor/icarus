@@ -7,12 +7,12 @@ Humans and agents are both welcome. The rules in [ARCHITECTURE.md](ARCHITECTURE.
 ```sh
 cargo fmt
 cargo clippy --all-targets   # no warnings
-cargo test                   # includes the determinism tests
+cargo test                   # includes the determinism tests and a headless run of the native app
 cargo run --release -- demo
 node scripts/gui-smoke.mjs   # if you touched the GUI, the session or an adapter (needs Node 22+ and Chromium)
 ```
 
-On Debian/Ubuntu you need `libpipewire-0.3-dev`, `pkg-config` and `clang`. On Arch, `pipewire` and `clang`.
+On Debian/Ubuntu you need `libpipewire-0.3-dev`, `pkg-config`, `clang` and `libxkbcommon-dev`, plus `fonts-dejavu-core` for the app tests. On Arch, `pipewire`, `clang` and a DejaVu or Noto font. The app test renders screenshots when a GPU (or Mesa's lavapipe, `mesa-vulkan-drivers`) is available, and still runs its checks without one.
 
 ## Agent contributions
 

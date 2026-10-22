@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Icarus
+GenericName=Digital Audio Workstation
+Comment=Open, agent-native DAW
+Exec=icarus
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=daw;music;audio;synth;agent;
+StartupWMClass=icarus

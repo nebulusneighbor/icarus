@@ -14,9 +14,10 @@ import graph from "./panels/graph.js";
 import automation from "./panels/automation.js";
 import inspector from "./panels/inspector.js";
 import log from "./panels/log.js";
+import controls from "./panels/controls.js";
 
 /// Built-in panel types. A component in /ui/components with the same name replaces one.
-export const BUILTINS = { transport, browser, mixer, devices, graph, automation, inspector, log };
+export const BUILTINS = { transport, browser, mixer, devices, graph, automation, inspector, log, controls };
 
 const store = {
   get(k, fallback) {
@@ -294,7 +295,7 @@ function addPanel() {
   while (ui.panels?.[`panel${n}`]) n++;
   editJson(`/ui/panels/panel${n}`, {
     title: `New panel — type is one of: ${[...new Set(types)].join(", ")}; area is one of: ${areas.join(", ")}`,
-    initial: { type: "inspector", area: areas.includes("main") ? "main" : areas[0], title: `Panel ${n}`, order: 9 },
+    initial: { type: "controls", area: areas.includes("bottom") ? "bottom" : areas[0], title: `Panel ${n}`, order: 9, props: { widgets: [] } },
   });
 }
 

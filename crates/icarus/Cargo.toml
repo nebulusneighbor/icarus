@@ -6,14 +6,17 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["live"]
+default = ["live", "app"]
 live = ["dep:icarus-pipewire"]
+app = ["dep:icarus-app"]
 
 [dependencies]
 icarus-model.workspace = true
 icarus-engine.workspace = true
 icarus-session.workspace = true
 icarus-pipewire = { workspace = true, optional = true }
+icarus-app = { workspace = true, optional = true }
+icarus-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 icarus-render.workspace = true

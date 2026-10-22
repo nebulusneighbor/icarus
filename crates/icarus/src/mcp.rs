@@ -3,125 +3,19 @@
 //! The tools are thin: each one builds protocol [`Request`]s, and `request` accepts any request
 //! verbatim, so an agent is never limited to what the curated tools cover.
 //!
-//! The server either owns a session ([`Local`]) or bridges to one that is already running, such
-//! as the GUI's, over the JSON socket ([`Remote`]). MCP clients start servers as subprocesses,
+//! The server either owns a session (`icarus_client::Local`) or bridges to one that is already
+//! running, such as the GUI's, over the JSON socket (`icarus_client::Remote`). MCP clients start servers as subprocesses,
 //! so the bridge is how an agent joins the session a person is already working in.
 
-use crate::Shared;
+use icarus_client::{Connection, Events};
 use icarus_model::{Gesture, ProbeSpec, RenderSpec, Request};
-use icarus_session::{Event, FeedId};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
-use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Arc, Mutex};
+use std::io::{BufRead, Write};
 
-/// Most events a bridge holds for an agent that is not polling; older ones are dropped.
-const MAX_QUEUED_EVENTS: usize = 10_000;
-
-/// Where requests go.
-pub trait Backend {
-    fn request(&mut self, client: &str, request: Request) -> Result<Value, String>;
-    /// Up to `max` queued events, oldest first.
-    fn events(&mut self, max: usize) -> Vec<Value>;
-}
-
-/// A session in this process.
-pub struct Local {
-    shared: Shared,
-    feed: FeedId,
-    events: Receiver<Event>,
-}
-
-impl Local {
-    pub fn new(shared: Shared) -> Self {
-        let (feed, events) = shared.lock().expect("session lock").open_feed();
-        Self { shared, feed, events }
-    }
-}
-
-impl Backend for Local {
-    fn request(&mut self, client: &str, request: Request) -> Result<Value, String> {
-        self.shared
-            .lock()
-            .expect("session lock")
-            .handle_with_feed(client, Some(self.feed), request)
-            .map_err(|e| e.to_string())
-    }
-
-    fn events(&mut self, max: usize) -> Vec<Value> {
-        self.events.try_iter().take(max).map(|e| json!(e)).collect()
-    }
-}
-
-/// A session in another process, reached through its JSON socket.
-pub struct Remote {
-    writer: TcpStream,
-    replies: Receiver<Value>,
-    events: Arc<Mutex<VecDeque<Value>>>,
-    next_id: u64,
-}
-
-impl Remote {
-    pub fn connect(addr: &str) -> anyhow::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
-        let reader = BufReader::new(stream.try_clone()?);
-        let (reply_tx, replies) = channel();
-        let events: Arc<Mutex<VecDeque<Value>>> = Arc::default();
-        let queue = events.clone();
-        std::thread::spawn(move || {
-            for line in reader.lines() {
-                let Some(msg) = line.ok().and_then(|l| serde_json::from_str::<Value>(&l).ok()) else {
-                    break;
-                };
-                if let Some(event) = msg.get("event") {
-                    let mut q = queue.lock().expect("event queue");
-                    if q.len() == MAX_QUEUED_EVENTS {
-                        q.pop_front();
-                    }
-                    q.push_back(event.clone());
-                } else if reply_tx.send(msg).is_err() {
-                    break;
-                }
-            }
-        });
-        Ok(Self {
-            writer: stream,
-            replies,
-            events,
-            next_id: 0,
-        })
-    }
-}
-
-impl Backend for Remote {
-    fn request(&mut self, client: &str, request: Request) -> Result<Value, String> {
-        self.next_id += 1;
-        let id = self.next_id;
-        let line = json!({ "id": id, "client": client, "request": request });
-        writeln!(self.writer, "{line}").map_err(|e| format!("session connection lost: {e}"))?;
-        loop {
-            let reply = self
-                .replies
-                .recv()
-                .map_err(|_| "session connection closed".to_string())?;
-            if reply["id"] != json!(id) {
-                continue;
-            }
-            return if reply["ok"] == json!(true) {
-                Ok(reply["result"].clone())
-            } else {
-                Err(reply["error"].as_str().unwrap_or("request failed").to_string())
-            };
-        }
-    }
-
-    fn events(&mut self, max: usize) -> Vec<Value> {
-        let mut q = self.events.lock().expect("event queue");
-        let n = max.min(q.len());
-        q.drain(..n).collect()
-    }
+/// A connection plus the events it has subscribed to.
+pub struct Backend {
+    pub connection: Box<dyn Connection>,
+    pub events: Events,
 }
 
 fn tools() -> Value {
@@ -224,12 +118,12 @@ fn arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, Str
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null)).map_err(|e| format!("`{key}`: {e}"))
 }
 
-fn call(backend: &mut dyn Backend, client: &str, name: &str, args: &Value) -> Result<Value, String> {
+fn call(backend: &mut Backend, client: &str, name: &str, args: &Value) -> Result<Value, String> {
     if name == "events" {
         let max = arg::<Option<usize>>(args, "max")?.unwrap_or(100);
-        return Ok(json!({ "events": backend.events(max) }));
+        return Ok(json!({ "events": backend.events.drain(max) }));
     }
-    let mut run = |r: Request| backend.request(client, r);
+    let mut run = |r: Request| backend.connection.request(client, r);
     match name {
         "list" => run(Request::List {
             path: arg::<Option<String>>(args, "path")?.unwrap_or_default(),
@@ -284,7 +178,7 @@ fn call(backend: &mut dyn Backend, client: &str, name: &str, args: &Value) -> Re
     }
 }
 
-pub fn run(mut backend: impl Backend) -> anyhow::Result<()> {
+pub fn run(mut backend: Backend) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     let mut client = "mcp".to_string();

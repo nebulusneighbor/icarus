@@ -1,0 +1,12 @@
+[package]
+name = "icarus-client"
+description = "Connect to an Icarus session, in this process or over its JSON socket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+icarus-model.workspace = true
+icarus-session.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
